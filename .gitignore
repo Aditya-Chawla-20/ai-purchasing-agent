@@ -42,9 +42,8 @@ pnpm-debug.log*
 purchasing.db*
 checkpoints.db*
 
-# Graphify Caches & Internal State
-graphify-out/cache/
-graphify-out/.*
+# Graphify
+graphify-out/
 
 # Operating System & IDEs
 .DS_Store
