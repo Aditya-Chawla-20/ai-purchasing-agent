@@ -13,6 +13,7 @@ from purchasing.infrastructure.models import (
     PurchaseOrder,
     PurchaseOrderItem,
     Recommendation,
+    SalesObservation,
     StorageCapacity,
     Supplier,
     SupplierProduct,
@@ -25,8 +26,15 @@ def seed_demo_data(session: Session) -> None:
         return
     now = datetime.now(UTC)
     node = Node(code="BLR-01", name="Bengaluru Fulfilment Centre")
-    main_supplier = Supplier(code="SUP-01", name="Fresh Farms", reliability_score=96)
-    alternate = Supplier(code="SUP-02", name="Green Valley Supply", reliability_score=91)
+    main_supplier = Supplier(
+        code="SUP-01", name="Fresh Farms", reliability_score=96, reliability_score_bps=9600
+    )
+    alternate = Supplier(
+        code="SUP-02", name="Green Valley Supply", reliability_score=91, reliability_score_bps=9100
+    )
+    premium_supplier = Supplier(
+        code="SUP-03", name="Apex Organic Depot", reliability_score=98, reliability_score_bps=9800
+    )
     apples = Product(
         sku="APL-001",
         name="Royal Gala Apples",
@@ -45,7 +53,17 @@ def seed_demo_data(session: Session) -> None:
     )
     partial_product = Product(sku="APL-005", name="Organic Apples", unit_volume=10)
     session.add_all(
-        [node, main_supplier, alternate, apples, berries, flour, stale, partial_product]
+        [
+            node,
+            main_supplier,
+            alternate,
+            premium_supplier,
+            apples,
+            berries,
+            flour,
+            stale,
+            partial_product,
+        ]
     )
     session.flush()
     session.add_all(
@@ -74,6 +92,8 @@ def seed_demo_data(session: Session) -> None:
         (main_supplier, stale, 1100, 10, 4, 200),
         (main_supplier, partial_product, 1250, 50, 5, 500),
         (alternate, partial_product, 1325, 25, 6, 500),
+        (premium_supplier, apples, 1400, 20, 2, 300),
+        (premium_supplier, partial_product, 1400, 20, 2, 300),
     ]:
         session.add(
             SupplierProduct(
@@ -116,6 +136,19 @@ def seed_demo_data(session: Session) -> None:
                 observed_at=now - (timedelta(days=3) if product is stale else timedelta(minutes=1)),
             )
         )
+    # Seed 24-hour sales observation for apples (Scenario 3 velocity detection)
+    session.add(
+        SalesObservation(
+            product_id=apples.id,
+            node_id=node.id,
+            window_start=now - timedelta(hours=24),
+            window_end=now,
+            units_sold=180,
+            source="mock-pos",
+            source_version="1",
+            observed_at=now,
+        )
+    )
     session.add(
         Budget(
             node_id=node.id,

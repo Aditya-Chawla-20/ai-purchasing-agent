@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from purchasing.api.routes import router
+from purchasing.application.custom_fixture_cleanup import cleanup_expired_custom_fixtures
 from purchasing.application.seeding import seed_demo_data
 from purchasing.infrastructure.db import SessionLocal
 from purchasing.settings import settings
@@ -18,6 +19,7 @@ from purchasing.workflow.graph import ReviewWorkflow, build_graph
 async def lifespan(app: FastAPI):
     with SessionLocal() as session:
         seed_demo_data(session)
+        cleanup_expired_custom_fixtures(session)
     checkpoint_path = Path(settings.checkpoint_db)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     with SqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:

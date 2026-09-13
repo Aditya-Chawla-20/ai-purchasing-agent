@@ -24,6 +24,122 @@ from purchasing.infrastructure.models import (
 from purchasing.settings import settings
 
 
+def build_inputs_from_tool_results(
+    recommendation: Recommendation,
+    results: dict[str, object],
+) -> tuple[PurchaseInputs, dict]:
+    """Build the policy snapshot solely from normalized tool envelopes.
+
+    This deliberately has no database access: a tool call that was omitted,
+    failed, stale, or scoped incorrectly cannot be silently replaced by a
+    repository read later in the workflow.
+    """
+    now = datetime.now(UTC)
+
+    def envelope(name: str) -> tuple[dict, object | None]:
+        response = results.get(name)
+        if response is None or not getattr(response, "ok", False):
+            return {}, response
+        return dict(getattr(response, "data", {}) or {}), response
+
+    def timestamp(response: object | None) -> datetime | None:
+        value = getattr(response, "observed_at", None)
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+        except ValueError:
+            return None
+
+    def fact(name: str, value: object, response: object | None, max_age: timedelta) -> EvidenceFact:
+        observed = timestamp(response)
+        status = EvidenceStatus.FRESH
+        if response is None or not getattr(response, "ok", False) or value is None:
+            status = EvidenceStatus.MISSING
+        elif observed is None or now - observed > max_age:
+            status = EvidenceStatus.STALE
+        return EvidenceFact(
+            name=name,
+            status=status,
+            source=getattr(response, "source", "tool-dispatcher") if response else "tool-dispatcher",
+            observed_at=observed.isoformat() if observed else now.isoformat(),
+            value=value,
+            version=getattr(response, "source_version", None) if response else None,
+        )
+
+    inventory, inventory_response = envelope("get_inventory")
+    terms, terms_response = envelope("get_supplier_terms")
+    forecast, forecast_response = envelope("get_demand_forecast")
+    budget, budget_response = envelope("get_budget")
+    storage, storage_response = envelope("get_storage_capacity")
+    policy, policy_response = envelope("get_planning_policy")
+    open_pos, po_response = envelope("list_open_purchase_orders")
+    recent_sales, sales_response = envelope("get_recent_sales")
+
+    horizon_days = int(terms.get("lead_time_days", 0)) + int(policy.get("review_period_days", 0))
+    horizon = now + timedelta(days=horizon_days)
+    incoming = 0
+    for item in open_pos.get("items", []):
+        try:
+            delivery = datetime.fromisoformat(str(item["expected_delivery_at"]).replace("Z", "+00:00"))
+            delivery = delivery.replace(tzinfo=UTC) if delivery.tzinfo is None else delivery
+        except (KeyError, TypeError, ValueError):
+            continue
+        if now <= delivery <= horizon:
+            incoming += max(0, int(item.get("confirmed_quantity", 0)) - int(item.get("received_quantity", 0)))
+
+    inventory_conflict = bool(inventory) and int(inventory.get("reserved", 0)) + int(inventory.get("damaged", 0)) > int(inventory.get("on_hand", 0))
+    facts = [
+        fact("inventory", inventory or None, inventory_response, timedelta(minutes=settings.demo_volatile_freshness_minutes)),
+        fact("supplier_terms", terms or None, terms_response, timedelta(hours=24)),
+        fact("supplier_availability", terms.get("max_available_quantity") if terms else None, terms_response, timedelta(minutes=settings.demo_volatile_freshness_minutes)),
+        fact("forecast", forecast or None, forecast_response, timedelta(hours=24)),
+        fact("budget", budget or None, budget_response, timedelta(minutes=settings.demo_volatile_freshness_minutes)),
+        fact("storage", storage or None, storage_response, timedelta(minutes=settings.demo_volatile_freshness_minutes)),
+        fact("planning_policy", policy or None, policy_response, timedelta(hours=24)),
+        fact("open_purchase_orders", incoming if po_response and getattr(po_response, "ok", False) else None, po_response, timedelta(minutes=settings.demo_volatile_freshness_minutes)),
+    ]
+    if "get_recent_sales" in results:
+        facts.append(fact("recent_sales", recent_sales or None, sales_response, timedelta(minutes=15)))
+    if inventory_conflict:
+        facts[0] = facts[0].model_copy(update={"status": EvidenceStatus.CONFLICTING})
+    complete = all(item.status == EvidenceStatus.FRESH for item in facts)
+    raw = {
+        "recommendation_id": recommendation.id,
+        "product_id": recommendation.product_id,
+        "node_id": recommendation.node_id,
+        "supplier_id": recommendation.preferred_supplier_id,
+        "original_quantity": recommendation.recommended_quantity,
+        "on_hand": int(inventory.get("on_hand", 0)),
+        "reserved": int(inventory.get("reserved", 0)),
+        "damaged": int(inventory.get("damaged", 0)),
+        "confirmed_incoming": incoming,
+        "forecast_demand": int(forecast.get("expected_demand", 0)),
+        "safety_stock": int(policy.get("safety_stock", 0)),
+        "unit_cost_minor": int(terms.get("unit_cost_minor", 1)),
+        "currency": str(terms.get("currency", budget.get("currency", "INR"))),
+        "budget_available_minor": int(budget.get("available_minor", 0)),
+        "budget_currency": budget.get("currency"),
+        "minimum_order_quantity": int(terms.get("minimum_order_quantity", 1)),
+        "available_supplier_quantity": terms.get("max_available_quantity"),
+        "available_storage_volume": int(storage.get("available_volume", 0)),
+        "product_unit_volume": int(policy.get("product_unit_volume", 1)),
+        "evidence": [item.model_dump(mode="json") for item in facts],
+        "evidence_complete": complete,
+        "errors": [
+            f"{item.name} is {item.status.value.lower()}"
+            for item in facts if item.status != EvidenceStatus.FRESH
+        ],
+        "horizon_days": horizon_days,
+    }
+    inputs = PurchaseInputs.model_validate({
+        key: value for key, value in raw.items()
+        if key not in {"recommendation_id", "product_id", "node_id", "supplier_id", "budget_currency", "errors", "horizon_days"}
+    })
+    return inputs, {**raw, "policy_inputs": inputs.model_dump(mode="json")}
+
+
 def collect_inputs(
     session: Session, recommendation: Recommendation
 ) -> tuple[PurchaseInputs, dict, Product, Supplier]:

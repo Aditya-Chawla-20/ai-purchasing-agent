@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     groq_api_key: str | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model: str = "groq/compound"
+    # Compound is retained for explanations. Custom application tools require
+    # a separate tool-capable model.
+    groq_agent_model: str = "openai/gpt-oss-120b"
     llm_timeout_seconds: float = Field(default=30, ge=10)
     max_recovery_attempts: int = 2
     # Mock source timestamps are static between application restarts. Keep the

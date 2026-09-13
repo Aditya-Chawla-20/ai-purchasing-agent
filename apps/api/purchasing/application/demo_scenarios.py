@@ -11,16 +11,25 @@ from sqlalchemy.orm import Session
 from purchasing.application.audit import record_event
 from purchasing.infrastructure.models import (
     ActionAttempt,
+    AgentToolCall,
     ApprovalRequest,
     AuditEvent,
     Budget,
     Decision,
+    DemandSignal,
     EvidenceSnapshot,
+    Forecast,
     Inventory,
+    InvestigationTrace,
     PurchaseOrder,
     PurchaseOrderItem,
+    PurchaseProposal,
     PurchasingReview,
     Recommendation,
+    SalesObservation,
+    SourcingOptionAssessment,
+    SourcingPlan,
+    SourcingPlanLine,
     StorageCapacity,
     Supplier,
     SupplierConfirmation,
@@ -78,6 +87,18 @@ SCENARIOS: dict[str, DemoScenario] = {
         ),
         next_step="Approve the proposal and inspect the quantity mismatch in validation.",
     ),
+    "multi-supplier-shortfall": DemoScenario(
+        title="Supplier shortfall & alternate allocation",
+        purpose="The primary supplier confirms only 250 of 500 units; agent compares candidate suppliers and allocates a multi-line plan.",
+        expected_outcome="The agent allocates 250 units to Primary and 200 units to Secondary, validating both purchase orders.",
+        next_step="Inspect candidate supplier comparisons and the multi-supplier sourcing plan.",
+    ),
+    "demand-spike": DemoScenario(
+        title="Demand spike & supplemental sourcing",
+        purpose="Recent 24h sales jump to 1.8x velocity; revised forecast demand increases to 950 units.",
+        expected_outcome="The agent detects the velocity spike >= 1.5x and produces a supplemental sourcing plan without altering issued POs.",
+        next_step="Inspect the demand velocity ratio and supplemental plan lines.",
+    ),
 }
 
 
@@ -111,8 +132,42 @@ def reset_scenario(session: Session, name: str) -> tuple[PurchasingReview, DemoS
     elif name == "late-incoming-po":
         _make_delayed_supply_visible(session, recommendation, now)
 
+    scenario_type = "recommendation-review"
+    if name == "multi-supplier-shortfall":
+        scenario_type = "supplier-shortfall"
+        sp = session.get(
+            SupplierProduct,
+            (recommendation.preferred_supplier_id, recommendation.product_id),
+        )
+        if sp:
+            sp.max_available_quantity = 300
+            sp.observed_at = now
+    elif name == "demand-spike":
+        scenario_type = "demand-change"
+        revised_fc = session.scalar(
+            select(Forecast).where(
+                Forecast.product_id == recommendation.product_id,
+                Forecast.node_id == recommendation.node_id,
+                Forecast.model_version == "revised-v2",
+            )
+        )
+        if not revised_fc:
+            session.add(
+                Forecast(
+                    product_id=recommendation.product_id,
+                    node_id=recommendation.node_id,
+                    window_start=now,
+                    window_end=now + timedelta(days=8),
+                    expected_demand=950,
+                    model_version="revised-v2",
+                    observed_at=now,
+                )
+            )
+            session.flush()
+
     review = PurchasingReview(
         recommendation_id=recommendation.id,
+        scenario_type=scenario_type,
         status="CREATED",
         idempotency_key=f"demo-scenario:{name}:{now.timestamp()}",
     )
@@ -189,16 +244,12 @@ def _clear_seeded_review_history(session: Session) -> None:
     }
     po_ids.update(
         session.scalars(
-            select(PurchaseOrder.id).where(PurchaseOrder.idempotency_key.like("demo-scenario:%"))
+            select(PurchaseOrder.id).where(
+                (PurchaseOrder.idempotency_key.like("demo-scenario:%"))
+                | (PurchaseOrder.idempotency_key.like("po-%"))
+            )
         )
     )
-    session.execute(delete(AuditEvent).where(AuditEvent.review_id.in_(review_ids)))
-    session.execute(delete(ValidationResult).where(ValidationResult.review_id.in_(review_ids)))
-    session.execute(delete(ActionAttempt).where(ActionAttempt.review_id.in_(review_ids)))
-    session.execute(delete(ApprovalRequest).where(ApprovalRequest.review_id.in_(review_ids)))
-    session.execute(delete(Decision).where(Decision.review_id.in_(review_ids)))
-    session.execute(delete(EvidenceSnapshot).where(EvidenceSnapshot.review_id.in_(review_ids)))
-    session.execute(delete(PurchasingReview).where(PurchasingReview.id.in_(review_ids)))
     if po_ids:
         session.execute(
             delete(SupplierConfirmation).where(SupplierConfirmation.purchase_order_id.in_(po_ids))
@@ -207,6 +258,36 @@ def _clear_seeded_review_history(session: Session) -> None:
             delete(PurchaseOrderItem).where(PurchaseOrderItem.purchase_order_id.in_(po_ids))
         )
         session.execute(delete(PurchaseOrder).where(PurchaseOrder.id.in_(po_ids)))
+
+    trace_ids = set(
+        session.scalars(
+            select(InvestigationTrace.id).where(InvestigationTrace.review_id.in_(review_ids))
+        ).all()
+    )
+    if trace_ids:
+        session.execute(delete(AgentToolCall).where(AgentToolCall.investigation_trace_id.in_(trace_ids)))
+        session.execute(delete(InvestigationTrace).where(InvestigationTrace.id.in_(trace_ids)))
+
+    plan_ids = set(
+        session.scalars(
+            select(SourcingPlan.id).where(SourcingPlan.review_id.in_(review_ids))
+        ).all()
+    )
+    # Approval requests now pin the immutable proposal they approved. Clear
+    # dependent audit/action state before resetting scoped demo plans.
+    session.execute(delete(ValidationResult).where(ValidationResult.review_id.in_(review_ids)))
+    session.execute(delete(ActionAttempt).where(ActionAttempt.review_id.in_(review_ids)))
+    session.execute(delete(ApprovalRequest).where(ApprovalRequest.review_id.in_(review_ids)))
+    if plan_ids:
+        session.execute(delete(PurchaseProposal).where(PurchaseProposal.sourcing_plan_id.in_(plan_ids)))
+        session.execute(delete(SourcingPlanLine).where(SourcingPlanLine.sourcing_plan_id.in_(plan_ids)))
+        session.execute(delete(SourcingOptionAssessment).where(SourcingOptionAssessment.sourcing_plan_id.in_(plan_ids)))
+        session.execute(delete(SourcingPlan).where(SourcingPlan.id.in_(plan_ids)))
+    session.execute(delete(PurchaseProposal).where(PurchaseProposal.review_id.in_(review_ids)))
+    session.execute(delete(AuditEvent).where(AuditEvent.review_id.in_(review_ids)))
+    session.execute(delete(Decision).where(Decision.review_id.in_(review_ids)))
+    session.execute(delete(EvidenceSnapshot).where(EvidenceSnapshot.review_id.in_(review_ids)))
+    session.execute(delete(PurchasingReview).where(PurchasingReview.id.in_(review_ids)))
 
 
 def _restore_baseline(session: Session) -> None:
@@ -250,6 +331,18 @@ def _restore_baseline(session: Session) -> None:
     )
     assert partial_item is not None
     partial_item.confirmed_quantity = 0
+
+    session.execute(delete(DemandSignal))
+    session.execute(
+        delete(Forecast).where(
+            Forecast.model_version.in_(["revised-v2", "custom-baseline", "custom-revised"])
+        )
+    )
+    session.execute(
+        delete(SalesObservation).where(
+            SalesObservation.source_version.in_(["pos-v2", "custom-sales"])
+        )
+    )
 
 
 def _make_delayed_supply_visible(
