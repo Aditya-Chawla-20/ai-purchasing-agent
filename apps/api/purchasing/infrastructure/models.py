@@ -36,6 +36,8 @@ class NodeProductPolicy(Base):
     node_id: Mapped[str] = mapped_column(ForeignKey("nodes.id"), primary_key=True)
     safety_stock: Mapped[int] = mapped_column(Integer, default=0)
     review_period_days: Mapped[int] = mapped_column(Integer, default=2)
+    demand_spike_threshold_bps: Mapped[int] = mapped_column(Integer, default=15000)
+    minimum_sales_observation_hours: Mapped[int] = mapped_column(Integer, default=24)
     version: Mapped[int] = mapped_column(Integer, default=1)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
@@ -47,6 +49,7 @@ class Supplier(Base):
     name: Mapped[str] = mapped_column(String)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     reliability_score: Mapped[int] = mapped_column(Integer, default=95)
+    reliability_score_bps: Mapped[int] = mapped_column(Integer, default=9500)
 
 
 class SupplierProduct(Base):
@@ -77,7 +80,8 @@ class Forecast(Base):
     __tablename__ = "forecasts"
     __table_args__ = (
         UniqueConstraint(
-            "product_id", "node_id", "window_start", "window_end", name="uq_forecast_window"
+            "product_id", "node_id", "window_start", "window_end", "model_version",
+            name="uq_forecast_window_version",
         ),
     )
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
@@ -154,7 +158,10 @@ class Recommendation(Base):
 class PurchasingReview(Base):
     __tablename__ = "purchasing_reviews"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
-    recommendation_id: Mapped[str] = mapped_column(ForeignKey("recommendations.id"), index=True)
+    recommendation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("recommendations.id"), index=True, nullable=True
+    )
+    scenario_type: Mapped[str] = mapped_column(String, default="recommendation-review")
     idempotency_key: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
     status: Mapped[str] = mapped_column(String, default="CREATED", index=True)
     policy_version: Mapped[str] = mapped_column(String, default="v1")
@@ -200,6 +207,7 @@ class ApprovalRequest(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     review_id: Mapped[str] = mapped_column(ForeignKey("purchasing_reviews.id"), index=True)
     decision_id: Mapped[str] = mapped_column(ForeignKey("decisions.id"))
+    proposal_id: Mapped[str | None] = mapped_column(ForeignKey("purchase_proposals.id"), nullable=True)
     proposal_version: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String, default="PENDING")
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
@@ -213,6 +221,7 @@ class ActionAttempt(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     review_id: Mapped[str] = mapped_column(ForeignKey("purchasing_reviews.id"), index=True)
     decision_id: Mapped[str] = mapped_column(ForeignKey("decisions.id"))
+    sourcing_plan_line_id: Mapped[str | None] = mapped_column(String, nullable=True)
     attempt_number: Mapped[int] = mapped_column(Integer)
     action_type: Mapped[str] = mapped_column(String, default="CREATE_PO")
     idempotency_key: Mapped[str] = mapped_column(String, unique=True)
@@ -256,6 +265,163 @@ class AuditEvent(Base):
     correlation_id: Mapped[str] = mapped_column(String)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Expansion Models (Spec 04)
+# ---------------------------------------------------------------------------
+
+
+class SalesObservation(Base):
+    __tablename__ = "sales_observations"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), index=True)
+    node_id: Mapped[str] = mapped_column(ForeignKey("nodes.id"), index=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    units_sold: Mapped[int] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String, default="mock-pos")
+    source_version: Mapped[str] = mapped_column(String, default="1")
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id", "node_id", "window_start", "window_end", "source_version",
+            name="uq_sales_observation"
+        ),
+    )
+
+
+class DemandSignal(Base):
+    __tablename__ = "demand_signals"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    external_event_id: Mapped[str] = mapped_column(String, unique=True)
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), index=True)
+    node_id: Mapped[str] = mapped_column(ForeignKey("nodes.id"), index=True)
+    sales_observation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sales_observations.id"), nullable=True
+    )
+    baseline_forecast_id: Mapped[str | None] = mapped_column(
+        ForeignKey("forecasts.id"), nullable=True
+    )
+    revised_forecast_id: Mapped[str | None] = mapped_column(
+        ForeignKey("forecasts.id"), nullable=True
+    )
+    actual_to_baseline_ratio_bps: Mapped[int] = mapped_column(Integer)
+    threshold_bps: Mapped[int] = mapped_column(Integer, default=15000)
+    source_version: Mapped[str] = mapped_column(String, default="1")
+    triggered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class SourcingPlan(Base):
+    __tablename__ = "sourcing_plans"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    review_id: Mapped[str] = mapped_column(ForeignKey("purchasing_reviews.id"), index=True)
+    decision_id: Mapped[str | None] = mapped_column(ForeignKey("decisions.id"), nullable=True)
+    evidence_snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("evidence_snapshots.id"), nullable=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"))
+    node_id: Mapped[str] = mapped_column(ForeignKey("nodes.id"))
+    currency: Mapped[str] = mapped_column(String(3), default="INR")
+    raw_need: Mapped[int] = mapped_column(Integer)
+    total_quantity: Mapped[int] = mapped_column(Integer)
+    total_cost_minor: Mapped[int] = mapped_column(Integer)
+    need_by_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    allocation_policy_version: Mapped[str] = mapped_column(String, default="v1")
+    status: Mapped[str] = mapped_column(String, default="COMPLETE")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("review_id", "version", name="uq_sourcing_plan_review_version"),
+    )
+
+
+class SourcingPlanLine(Base):
+    __tablename__ = "sourcing_plan_lines"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    sourcing_plan_id: Mapped[str] = mapped_column(ForeignKey("sourcing_plans.id"), index=True)
+    supplier_id: Mapped[str] = mapped_column(ForeignKey("suppliers.id"))
+    sequence: Mapped[int] = mapped_column(Integer)
+    quantity: Mapped[int] = mapped_column(Integer)
+    unit_cost_minor: Mapped[int] = mapped_column(Integer)
+    total_cost_minor: Mapped[int] = mapped_column(Integer)
+    minimum_order_quantity: Mapped[int] = mapped_column(Integer)
+    reliability_score_bps: Mapped[int] = mapped_column(Integer)
+    expected_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    inclusion_reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    idempotency_key: Mapped[str] = mapped_column(String, unique=True)
+    __table_args__ = (
+        UniqueConstraint("sourcing_plan_id", "supplier_id", name="uq_plan_supplier"),
+    )
+
+
+class SourcingOptionAssessment(Base):
+    __tablename__ = "sourcing_option_assessments"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    sourcing_plan_id: Mapped[str] = mapped_column(ForeignKey("sourcing_plans.id"), index=True)
+    supplier_id: Mapped[str] = mapped_column(ForeignKey("suppliers.id"))
+    eligible: Mapped[bool] = mapped_column(Boolean)
+    exclusion_reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    normalized_terms_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    __table_args__ = (
+        UniqueConstraint("sourcing_plan_id", "supplier_id", name="uq_assessment_supplier"),
+    )
+
+
+class PurchaseProposal(Base):
+    __tablename__ = "purchase_proposals"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    review_id: Mapped[str] = mapped_column(ForeignKey("purchasing_reviews.id"), index=True)
+    decision_id: Mapped[str] = mapped_column(ForeignKey("decisions.id"))
+    sourcing_plan_id: Mapped[str | None] = mapped_column(ForeignKey("sourcing_plans.id"), nullable=True)
+    proposal_version: Mapped[int] = mapped_column(Integer)
+    evidence_snapshot_hash: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, default="PENDING")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("review_id", "proposal_version", name="uq_proposal_review_version"),
+    )
+
+
+class InvestigationTrace(Base):
+    __tablename__ = "investigation_traces"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    review_id: Mapped[str] = mapped_column(ForeignKey("purchasing_reviews.id"), index=True)
+    scenario_type: Mapped[str] = mapped_column(String, default="recommendation-review")
+    provider: Mapped[str] = mapped_column(String, default="gemini")
+    model: Mapped[str] = mapped_column(String, default="gemini-3.8-flash")
+    allowed_tools_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    mandatory_manifest_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String, default="COMPLETED")
+    rounds_used: Mapped[int] = mapped_column(Integer, default=1)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentToolCall(Base):
+    __tablename__ = "agent_tool_calls"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    investigation_trace_id: Mapped[str] = mapped_column(
+        ForeignKey("investigation_traces.id"), index=True
+    )
+    round_number: Mapped[int] = mapped_column(Integer)
+    sequence: Mapped[int] = mapped_column(Integer)
+    tool_name: Mapped[str] = mapped_column(String)
+    arguments_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    arguments_hash: Mapped[str] = mapped_column(String)
+    result_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    result_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    provider: Mapped[str] = mapped_column(String, default="gemini")
+    model: Mapped[str] = mapped_column(String, default="gemini-3.8-flash")
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String, default="SUCCEEDED")
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("investigation_trace_id", "sequence", name="uq_tool_trace_sequence"),
+    )
 
 
 Index(

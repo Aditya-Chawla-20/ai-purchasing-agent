@@ -10,14 +10,18 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_engine(settings.database_url, connect_args={"check_same_thread": False})
+connect_args = {"check_same_thread": False}
+if "sqlite" in settings.database_url:
+    connect_args["timeout"] = 30
+
+engine = create_engine(settings.database_url, connect_args=connect_args)
 if engine.url.get_backend_name() == "sqlite":
 
     @event.listens_for(engine, "connect")
     def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
 
