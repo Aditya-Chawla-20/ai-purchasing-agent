@@ -5,7 +5,19 @@ import {
   FlaskConical, LayoutDashboard, LoaderCircle, MapPin, PackageCheck, PackageSearch, RefreshCw,
   ShieldCheck, Sparkles, Truck, Warehouse, X,
 } from 'lucide-react'
-import { api, type DemoScenario, type Evidence, type Recommendation, type Review, type TimelineEvent } from './api'
+import {
+  api,
+  type ActionItem,
+  type DemoScenario,
+  type Evidence,
+  type Recommendation,
+  type Review,
+  type TimelineEvent,
+} from './api'
+import { CustomScenarioModal } from './components/CustomScenarioModal'
+import { ExecutionRetryBanner } from './components/ExecutionRetryBanner'
+import { SourcingPlanView } from './components/SourcingPlanView'
+import { ToolTraceDrawer } from './components/ToolTraceDrawer'
 
 const scenarioChoices = [
   ['inventory-conflict', 'Inventory conflict'],
@@ -13,17 +25,21 @@ const scenarioChoices = [
   ['supplier-terms-change', 'Supplier quote change'],
   ['lost-create-response', 'Lost create response'],
   ['wrong-persisted-po', 'Wrong persisted PO'],
+  ['multi-supplier-shortfall', 'Supplier shortfall (multi-supplier)'],
+  ['demand-spike', 'Demand spike (velocity >= 1.5x)'],
 ] as const
 
 function App() {
   const [recommendations, setRecommendations] = useState<Recommendation[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [review, setReview] = useState<Review | null>(null)
+  const [reviewLoadFailedId, setReviewLoadFailedId] = useState<string | null>(null)
   const [events, setEvents] = useState<TimelineEvent[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [rejectOpen, setRejectOpen] = useState(false)
   const [approveOpen, setApproveOpen] = useState(false)
+  const [customLabOpen, setCustomLabOpen] = useState(false)
   const [rejectComment, setRejectComment] = useState('')
   const [notice, setNotice] = useState('')
   const [scenario, setScenario] = useState<DemoScenario | null>(null)
@@ -41,21 +57,25 @@ function App() {
 
   const loadReview = useCallback(async () => {
     if (!reviewId) { setReview(null); setEvents([]); return }
+    setReviewLoadFailedId(null)
     try {
       const [nextReview, nextEvents] = await Promise.all([api.review(reviewId), api.events(reviewId)])
       setReview(nextReview)
       setEvents(nextEvents.items)
-    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to load review.') }
+    } catch (e) {
+      setReviewLoadFailedId(reviewId)
+      setError(e instanceof Error ? e.message : 'Unable to load review.')
+    }
   }, [reviewId])
 
   useEffect(() => { void loadRecommendations() }, [loadRecommendations])
   useEffect(() => {
-    if (!reviewId) return
+    if (!reviewId || reviewLoadFailedId === reviewId) return
     void loadReview()
     if (review?.status === 'AWAITING_APPROVAL' || isTerminal(review?.status)) return
     const timer = window.setInterval(() => { void loadReview() }, 1000)
     return () => window.clearInterval(timer)
-  }, [loadReview, reviewId, review?.status])
+  }, [loadReview, reviewId, review?.status, reviewLoadFailedId])
 
   const selectedRecommendation = useMemo(() => {
     if (review && review.id === reviewId) return review.recommendation
@@ -98,6 +118,17 @@ function App() {
     finally { setBusy(false) }
   }
 
+  async function retryExecution() {
+    if (!review?.decision) return
+    setBusy(true); setError('')
+    try {
+      await api.retryExecution(review.id, review.decision.version)
+      setNotice('Execution retry initiated. Refreshing facts.')
+      await loadReview()
+    } catch (e) { setError(e instanceof Error ? e.message : 'Execution retry failed.') }
+    finally { setBusy(false) }
+  }
+
   async function simulatePartial() {
     setBusy(true); setError('')
     try {
@@ -135,6 +166,21 @@ function App() {
     finally { setBusy(false) }
   }
 
+  async function submitCustomScenario(data: Record<string, unknown>) {
+    setBusy(true); setError('')
+    try {
+      const res = await api.createCustomScenario(data)
+      setCustomLabOpen(false)
+      setSelected(res.review_id)
+      setNotice(`Custom scenario "${data.name}" created and launched!`)
+      await loadRecommendations()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to create custom scenario.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -158,7 +204,7 @@ function App() {
           <section className="metric-grid" aria-label="Purchasing overview">
             <Metric label="Needs your review" value={recommendations.filter(x => x.review_status === 'AWAITING_APPROVAL' || !x.review_status).length.toString().padStart(2, '0')} detail="Across all locations" icon={<FileText size={17} />} tone="violet" trend="Action needed" />
             <Metric label="Decisions today" value={recommendations.filter(x => x.review_status).length.toString().padStart(2, '0')} detail="Recommendations evaluated" icon={<CheckCircle2 size={17} />} tone="green" trend="Live" />
-            <Metric label="Purchase orders" value={review?.action ? '01' : '—'} detail="Created and validated" icon={<PackageCheck size={17} />} tone="blue" trend={review?.validation?.status ?? 'Awaiting action'} />
+            <Metric label="Purchase orders" value={review?.action || (review?.actions && review.actions.length > 0) ? String(review.actions?.length || 1).padStart(2, '0') : '—'} detail="Created and validated" icon={<PackageCheck size={17} />} tone="blue" trend={review?.validation?.status ?? 'Awaiting action'} />
             <Metric label="Policy checks" value={review?.decision?.constraints.filter(x => x.passed).length?.toString().padStart(2, '0') ?? '—'} detail="Hard constraints passing" icon={<ShieldCheck size={17} />} tone="amber" trend={review?.decision ? 'Deterministic' : 'Ready'} />
           </section>
 
@@ -166,8 +212,11 @@ function App() {
           {notice && <div className="alert notice-alert"><Check size={16} />{notice}</div>}
 
           <section className="scenario-lab" aria-labelledby="scenario-lab-title">
-            <div className="scenario-lab-title"><span className="scenario-lab-icon"><FlaskConical size={16} /></span><div><h2 id="scenario-lab-title">Scenario Lab</h2><p>Resettable proof points for Scenario 1 safety controls.</p></div></div>
-            <div className="scenario-options" aria-label="Choose a demo scenario">{scenarioChoices.map(([id, label]) => <button key={id} className={scenario?.scenario === id ? 'selected' : ''} aria-pressed={scenario?.scenario === id} onClick={() => void resetScenario(id)} disabled={busy}>{label}</button>)}</div>
+            <div className="scenario-lab-title"><span className="scenario-lab-icon"><FlaskConical size={16} /></span><div><h2 id="scenario-lab-title">Scenario Lab</h2><p>Resettable proof points for safety controls and multi-supplier allocation.</p></div></div>
+            <div className="scenario-options" aria-label="Choose a demo scenario">
+              {scenarioChoices.map(([id, label]) => <button key={id} className={scenario?.scenario === id ? 'selected' : ''} aria-pressed={scenario?.scenario === id} onClick={() => void resetScenario(id)} disabled={busy}>{label}</button>)}
+              <button className="custom-lab-button" onClick={() => setCustomLabOpen(true)} disabled={busy}><Sparkles size={14} /> Custom Scenario Lab</button>
+            </div>
             {scenario && <ScenarioGuide scenario={scenario} review={review} busy={busy} onAdvance={advanceScenario} />}
           </section>
 
@@ -182,7 +231,7 @@ function App() {
             </section>
 
             <section className="panel review-panel">
-              {!selectedRecommendation ? <div className="empty-review"><PackageSearch size={28} /><h3>Select a recommendation</h3><p>Choose an item from the queue to inspect its purchasing situation.</p></div> : !review ? <RecommendationDetail item={selectedRecommendation} busy={busy} onStart={startReview} /> : <ReviewDetail review={review} events={events} busy={busy} onApprove={() => setApproveOpen(true)} onReject={() => setRejectOpen(true)} />}
+              {!selectedRecommendation ? <div className="empty-review"><PackageSearch size={28} /><h3>Select a recommendation</h3><p>Choose an item from the queue to inspect its purchasing situation.</p></div> : !review ? <RecommendationDetail item={selectedRecommendation} busy={busy} onStart={startReview} /> : <ReviewDetail review={review} events={events} busy={busy} onApprove={() => setApproveOpen(true)} onReject={() => setRejectOpen(true)} onRetry={retryExecution} />}
             </section>
           </div>
 
@@ -192,6 +241,7 @@ function App() {
 
       {rejectOpen && <div className="modal-backdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="reject-title"><button className="modal-close" onClick={() => setRejectOpen(false)} aria-label="Close"><X size={18} /></button><span className="modal-icon"><AlertTriangle size={19} /></span><h2 id="reject-title">Reject this proposal?</h2><p>The purchase order will not be created. Add a short reason for the audit trail.</p><label htmlFor="reject-reason">Reason</label><textarea id="reject-reason" value={rejectComment} onChange={e => setRejectComment(e.target.value)} placeholder="Why are you rejecting this recommendation?" rows={3} /><div className="modal-actions"><button className="secondary-button" onClick={() => setRejectOpen(false)}>Keep reviewing</button><button className="danger-button" disabled={!rejectComment.trim() || busy} onClick={rejectProposal}>{busy ? 'Submitting…' : 'Reject proposal'}</button></div></section></div>}
       {approveOpen && review?.decision && <div className="modal-backdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="approve-title"><button className="modal-close" onClick={() => setApproveOpen(false)} aria-label="Close"><X size={18} /></button><span className="modal-icon"><ShieldCheck size={19} /></span><h2 id="approve-title">Confirm purchase order</h2><p>Approval is for this exact proposal. The system will refresh facts before creating the order.</p><div className="approval-confirmation"><span>{review.recommendation.supplier.name}</span><strong>{review.recommendation.product.sku} · {review.recommendation.node.code}</strong><b>{review.decision.proposed_quantity.toLocaleString()} units · {money(Number(review.decision.calculations.total_cost_minor ?? 0), String(review.decision.calculations.currency ?? 'INR'))}</b><small>Proposal version {review.decision.version}</small></div><div className="modal-actions"><button className="secondary-button" onClick={() => setApproveOpen(false)}>Keep reviewing</button><button className="primary-button" disabled={busy} onClick={submitApproval}>{busy ? 'Submitting…' : 'Approve exact proposal'}</button></div></section></div>}
+      <CustomScenarioModal open={customLabOpen} onClose={() => setCustomLabOpen(false)} onSubmit={submitCustomScenario} busy={busy} />
     </div>
   )
 }
@@ -201,6 +251,8 @@ function ScenarioGuide({ scenario, review, busy, onAdvance }: { scenario: DemoSc
     : scenario.scenario === 'late-incoming-po' ? Number(review?.decision?.calculations.raw_need) === 600
     : scenario.scenario === 'supplier-terms-change' ? (review?.decision?.version ?? 0) > 1
     : scenario.scenario === 'lost-create-response' ? review?.validation?.status === 'PASSED'
+    : scenario.scenario === 'multi-supplier-shortfall' ? (review?.sourcing_plan?.lines.length ?? 0) >= 2
+    : scenario.scenario === 'demand-spike' ? (review?.decision?.proposed_quantity ?? 0) > 0
     : review?.validation?.status === 'FAILED_UNSAFE'
   return <div className="scenario-guide">
     <div className="scenario-copy"><span className={`scenario-state ${guarded ? 'passed' : ''}`}>{guarded ? 'Guard confirmed' : 'Test in progress'}</span><strong>{scenario.title}</strong><p>{scenario.purpose}</p><small>Expected: {scenario.expected_outcome}</small></div>
@@ -234,12 +286,69 @@ function RecommendationDetail({ item, busy, onStart }: { item: Recommendation; b
   </>
 }
 
-function ReviewDetail({ review, events, busy, onApprove, onReject }: { review: Review; events: TimelineEvent[]; busy: boolean; onApprove: () => void; onReject: () => void }) {
+function ActionsList({ actions }: { actions: ActionItem[] }) {
+  if (!actions || actions.length <= 1) return null
+  return (
+    <div className="section-block actions-block">
+      <div className="section-title">
+        <div>
+          <h3>Executed purchase orders</h3>
+          <p>{actions.length} supplier orders created and validated</p>
+        </div>
+        <span className="policy-tag"><PackageCheck size={13} />MULTI-PO</span>
+      </div>
+      <div className="actions-table-wrap">
+        <table className="actions-table">
+          <thead>
+            <tr>
+              <th>Attempt</th>
+              <th>External ID</th>
+              <th>Status</th>
+              <th>Amount</th>
+              <th>Idempotency Key</th>
+            </tr>
+          </thead>
+          <tbody>
+            {actions.map((act) => (
+              <tr key={act.attempt_number}>
+                <td>{act.attempt_number}</td>
+                <td><strong>{act.external_id ?? act.purchase_order_id ?? '—'}</strong></td>
+                <td><span className={`status-pill ${act.status.toLowerCase()}`}>{act.status}</span></td>
+                <td>{money(Number(act.total_minor ?? 0), act.currency ?? 'INR')}</td>
+                <td className="font-mono text-muted">{act.idempotency_key.slice(-16)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function ReviewDetail({
+  review,
+  events,
+  busy,
+  onApprove,
+  onReject,
+  onRetry,
+}: {
+  review: Review
+  events: TimelineEvent[]
+  busy: boolean
+  onApprove: () => void
+  onReject: () => void
+  onRetry: () => void
+}) {
   const decision = review.decision
   const statusLabel = review.status.replaceAll('_', ' ').toLowerCase()
   const calc = decision?.calculations ?? {}
+
   return <>
     <div className="detail-header"><div className="detail-ident"><span className="product-thumb large mint"><span>{review.recommendation.product.name.slice(0, 1)}</span><i /></span><div><div className="section-kicker">PURCHASE REVIEW <span className="review-ref">#{review.id.slice(0, 8).toUpperCase()}</span></div><h2>{review.recommendation.product.name}</h2><p>{review.recommendation.product.sku} <i /> {review.recommendation.node.name}</p></div></div><span className={`status-pill ${statusLabel.replaceAll(' ', '-')}`}>{statusLabel}</span></div>
+
+    {review.status === 'AWAITING_EXECUTION_RETRY' && <ExecutionRetryBanner proposalVersion={review.decision?.version} busy={busy} onRetry={onRetry} />}
+
     {!decision && <div className="progress-card"><span className="progress-orb"><LoaderCircle className="spin" size={21} /></span><div><strong>Investigating the purchasing situation</strong><p>Collecting inventory, demand, open orders, supplier terms, budget and storage capacity.</p></div></div>}
     {decision && <>
       <div className={`decision-banner ${decision.type.toLowerCase()}`}><div className="decision-symbol">{decision.type === 'INVESTIGATE' ? <AlertTriangle size={19} /> : decision.type === 'REJECT' ? <X size={19} /> : <Check size={19} />}</div><div className="decision-copy"><span className="section-kicker">DETERMINISTIC DECISION <span className="confidence">{decision.confidence} CONFIDENCE</span></span><h3>{decision.type === 'MODIFY' ? 'Adjust the recommended quantity' : decision.type === 'ACCEPT' ? 'Recommendation is supported' : decision.type === 'REJECT' ? 'No additional purchase needed' : 'More information is needed'}</h3><p><span className="ai-label">AI explanation</span> {decision.explanation.summary}</p></div><div className="decision-qty"><small>PROPOSED</small><strong>{decision.proposed_quantity.toLocaleString()}</strong><span>units</span></div></div>
@@ -257,6 +366,8 @@ function ReviewDetail({ review, events, busy, onApprove, onReject }: { review: R
         </div>
       </div>
 
+      {review.investigation && <ToolTraceDrawer trace={review.investigation} />}
+
       <div className="section-block evidence-block"><div className="section-title"><div><h3>Evidence checked</h3><p>{review.evidence.completeness === 'COMPLETE' ? 'All required sources reviewed' : 'Some evidence needs attention'}</p></div><span className={`evidence-count ${review.evidence.completeness === 'COMPLETE' ? '' : 'warning'}`}>{review.evidence.items.length} sources</span></div>
         <div className="evidence-list">{review.evidence.items.map((fact: Evidence, i: number) => <EvidenceRow key={fact.name} fact={fact} index={i} />)}</div>
         {!!review.evidence.errors.length && <div className="evidence-warning"><AlertTriangle size={15} />{review.evidence.errors.join(' · ')}</div>}
@@ -264,13 +375,21 @@ function ReviewDetail({ review, events, busy, onApprove, onReject }: { review: R
 
       <div className="section-block constraints-block"><div className="section-title"><div><h3>Constraint checks</h3><p>Every hard limit is validated before execution</p></div><span className="check-summary">{decision.constraints.filter(x => x.passed).length}/{decision.constraints.length} pass</span></div><div className="constraint-list">{decision.constraints.map(check => <div className="constraint-row" key={check.code}><span className={`constraint-icon ${check.passed ? 'pass' : 'fail'}`}>{check.passed ? <Check size={12} /> : <X size={12} />}</span><span>{humanize(check.code)}</span><small>{constraintDetail(check)}</small></div>)}</div></div>
 
+      {review.sourcing_plan && <SourcingPlanView plan={review.sourcing_plan} />}
+
       {review.status === 'AWAITING_APPROVAL' && <div className="approval-bar"><div><strong>Ready for your decision</strong><span>Proposal v{decision.version} · {money(Number(decision.calculations.total_cost_minor ?? 0), String(decision.calculations.currency ?? 'INR'))} total</span></div><div className="approval-actions"><button className="reject-button" onClick={onReject} disabled={busy}>Reject</button><button className="primary-button" onClick={onApprove} disabled={busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}Approve & create PO</button></div></div>}
 
       {review.status === 'EXECUTING' || review.status === 'VALIDATING' ? <div className="progress-card compact"><span className="progress-orb"><LoaderCircle className="spin" size={19} /></span><div><strong>{review.status === 'EXECUTING' ? 'Creating purchase order' : 'Validating the purchase order'}</strong><p>Verifying the persisted result against the approved proposal.</p></div></div> : null}
-      {review.action && <div className={`result-card ${review.validation?.status === 'PASSED' ? 'success' : ''}`}><div className="result-icon">{review.validation?.status === 'PASSED' ? <CheckCircle2 size={18} /> : <FileCheck2 size={18} />}</div><div><strong>{review.validation?.status === 'PASSED' ? 'Purchase order created and validated' : 'Purchase order action recorded'}</strong><p>{review.action.external_id} · {money(Number(review.action.total_minor ?? 0), review.action.currency ?? 'INR')}</p></div><span className="validation-pill">{review.validation?.status ?? 'VALIDATING'}</span></div>}
+
+      {review.actions && review.actions.length > 1 ? (
+        <ActionsList actions={review.actions} />
+      ) : review.action ? (
+        <div className={`result-card ${review.validation?.status === 'PASSED' ? 'success' : ''}`}><div className="result-icon">{review.validation?.status === 'PASSED' ? <CheckCircle2 size={18} /> : <FileCheck2 size={18} />}</div><div><strong>{review.validation?.status === 'PASSED' ? 'Purchase order created and validated' : 'Purchase order action recorded'}</strong><p>{review.action.external_id} · {money(Number(review.action.total_minor ?? 0), review.action.currency ?? 'INR')}</p></div><span className="validation-pill">{review.validation?.status ?? 'VALIDATING'}</span></div>
+      ) : null}
+
       {review.status === 'NEEDS_ATTENTION' && <div className="needs-attention"><AlertTriangle size={17} /><div><strong>Buyer attention needed</strong><p>{review.evidence.errors.join(' · ') || decision.reason_codes.map(humanize).join(' · ')}</p></div></div>}
       {review.status === 'REJECTED_BY_BUYER' && <div className="result-card muted"><X size={17} /><div><strong>Proposal rejected</strong><p>{review.approval?.comment || 'No purchase order was created.'}</p></div></div>}
-      {review.status === 'COMPLETED' && !review.action && <div className="result-card success"><CheckCircle2 size={18} /><div><strong>Review complete — no purchase order created</strong><p>The recommendation was rejected because no additional inventory is required.</p></div></div>}
+      {review.status === 'COMPLETED' && !review.action && (!review.actions || review.actions.length === 0) && <div className="result-card success"><CheckCircle2 size={18} /><div><strong>Review complete — no purchase order created</strong><p>The recommendation was rejected because no additional inventory is required.</p></div></div>}
     </>}
 
     {review.status === 'NEEDS_ATTENTION' && !decision && <div className="needs-attention"><AlertTriangle size={17} /><div><strong>Recovery limit reached</strong><p>Partial fulfilment could not be safely replanned after {review.recovery_attempts ?? 0} recovery attempts. No new purchase order was created.</p></div></div>}
@@ -278,6 +397,233 @@ function ReviewDetail({ review, events, busy, onApprove, onReject }: { review: R
 
     <div className="timeline"><div className="section-title"><div><h3>Activity timeline</h3><p>Auditable steps in this review</p></div><span className="timeline-count">{events.length} events</span></div>{events.length ? <div className="timeline-list">{events.slice(-6).reverse().map(event => <div className="timeline-row" key={event.id}><span className="timeline-icon"><TimelineIcon type={event.event_type} /></span><div><strong>{humanize(event.event_type)}</strong><small>{new Date(event.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}{event.payload.quantity ? ` · ${event.payload.quantity} units` : ''}</small></div></div>)}</div> : <div className="timeline-empty">Activity will appear here as the review progresses.</div>}</div>
   </>
+}
+
+export function LegacyCustomScenarioModal({
+  open,
+  onClose,
+  onSubmit,
+  busy,
+}: {
+  open: boolean
+  onClose: () => void
+  onSubmit: (data: Record<string, unknown>) => Promise<void>
+  busy: boolean
+}) {
+  const [name, setName] = useState('Evaluator Custom Scenario')
+  const [mode, setMode] = useState<'RECOMMENDATION' | 'DEMAND_CHANGE'>('RECOMMENDATION')
+  const [sku, setSku] = useState('CUSTOM-01')
+  const [productName, setProductName] = useState('Custom Operational Item')
+  const [unitVolume, setUnitVolume] = useState(2)
+  const [nodeCode, setNodeCode] = useState('BLR-01')
+  const [nodeName, setNodeName] = useState('Bengaluru FC')
+  const [recommendedQty, setRecommendedQty] = useState(800)
+  const [onHand, setOnHand] = useState(100)
+  const [reserved, setReserved] = useState(0)
+  const [damaged, setDamaged] = useState(0)
+  const [baselineForecast, setBaselineForecast] = useState(500)
+  const [revisedForecast, setRevisedForecast] = useState(900)
+  const [supp1Code, setSupp1Code] = useState('SUP-01')
+  const [supp1Name, setSupp1Name] = useState('Primary Vendor')
+  const [supp1Cost, setSupp1Cost] = useState(1200)
+  const [supp1Rel, setSupp1Rel] = useState(9700)
+  const [supp1Max, setSupp1Max] = useState(300)
+  const [supp2Code, setSupp2Code] = useState('SUP-02')
+  const [supp2Name, setSupp2Name] = useState('Alternate Vendor')
+  const [supp2Cost, setSupp2Cost] = useState(1350)
+  const [supp2Rel, setSupp2Rel] = useState(9200)
+  const [supp2Max, setSupp2Max] = useState(500)
+  const [budgetAvailable, setBudgetAvailable] = useState(1000000)
+  const [storageVolume, setStorageVolume] = useState(5000)
+  const [safetyStock, setSafetyStock] = useState(50)
+
+  if (!open) return null
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const now = new Date()
+    const payload = {
+      name,
+      mode,
+      product: { sku, name: productName, unit_volume: Number(unitVolume) },
+      node: { code: nodeCode, name: nodeName },
+      recommended_quantity: Number(recommendedQty),
+      inventory: { on_hand: Number(onHand), reserved: Number(reserved), damaged: Number(damaged) },
+      forecasts: {
+        baseline: Number(baselineForecast),
+        revised: mode === 'DEMAND_CHANGE' ? Number(revisedForecast) : null,
+        window_start: now.toISOString(),
+        window_end: new Date(now.getTime() + 7 * 24 * 3600 * 1000).toISOString(),
+      },
+      suppliers: [
+        {
+          code: supp1Code,
+          name: supp1Name,
+          reliability_score_bps: Number(supp1Rel),
+          unit_cost_minor: Number(supp1Cost),
+          currency: 'INR',
+          minimum_order_quantity: 25,
+          lead_time_days: 2,
+          max_available_quantity: Number(supp1Max),
+        },
+        {
+          code: supp2Code,
+          name: supp2Name,
+          reliability_score_bps: Number(supp2Rel),
+          unit_cost_minor: Number(supp2Cost),
+          currency: 'INR',
+          minimum_order_quantity: 25,
+          lead_time_days: 3,
+          max_available_quantity: Number(supp2Max),
+        },
+      ],
+      budget: { available_minor: Number(budgetAvailable), currency: 'INR' },
+      storage: { available_volume: Number(storageVolume) },
+      policy: { safety_stock: Number(safetyStock), review_period_days: 2 },
+      recent_sales: mode === 'DEMAND_CHANGE' ? { units_sold: 280, window_hours: 24 } : null,
+    }
+    await onSubmit(payload)
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal custom-lab-modal" role="dialog" aria-modal="true" aria-labelledby="custom-lab-title">
+        <button className="modal-close" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        <span className="modal-icon"><FlaskConical size={19} /></span>
+        <h2 id="custom-lab-title">Custom Scenario Lab</h2>
+        <p>Define operational constraints and test multi-supplier or demand-spike intelligence live without writing code.</p>
+        <form onSubmit={handleSubmit}>
+          <div className="custom-form-grid">
+            <div className="form-field form-field-full">
+              <label>Scenario Name</label>
+              <input value={name} onChange={e => setName(e.target.value)} required />
+            </div>
+            <div className="form-field form-field-full">
+              <label>Evaluation Mode</label>
+              <select value={mode} onChange={e => setMode(e.target.value as 'RECOMMENDATION' | 'DEMAND_CHANGE')}>
+                <option value="RECOMMENDATION">Standard / Multi-Supplier Recommendation</option>
+                <option value="DEMAND_CHANGE">Demand Spike Change (24h sales jump)</option>
+              </select>
+            </div>
+
+            <div className="form-section-title">Product & Node</div>
+            <div className="form-field">
+              <label>SKU</label>
+              <input value={sku} onChange={e => setSku(e.target.value)} required />
+            </div>
+            <div className="form-field">
+              <label>Product Name</label>
+              <input value={productName} onChange={e => setProductName(e.target.value)} required />
+            </div>
+            <div className="form-field">
+              <label>Node Code</label>
+              <input value={nodeCode} onChange={e => setNodeCode(e.target.value)} required />
+            </div>
+            <div className="form-field">
+              <label>Node Name</label>
+              <input value={nodeName} onChange={e => setNodeName(e.target.value)} required />
+            </div>
+            <div className="form-field">
+              <label>Unit Volume (m³)</label>
+              <input type="number" min={1} value={unitVolume} onChange={e => setUnitVolume(Number(e.target.value))} required />
+            </div>
+            <div className="form-field">
+              <label>Recommended Qty</label>
+              <input type="number" min={0} value={recommendedQty} onChange={e => setRecommendedQty(Number(e.target.value))} required />
+            </div>
+
+            <div className="form-section-title">Inventory & Forecast</div>
+            <div className="form-field">
+              <label>Usable On-Hand</label>
+              <input type="number" min={0} value={onHand} onChange={e => setOnHand(Number(e.target.value))} required />
+            </div>
+            <div className="form-field">
+              <label>Reserved Units</label>
+              <input type="number" min={0} value={reserved} onChange={e => setReserved(Number(e.target.value))} required />
+            </div>
+            <div className="form-field">
+              <label>Damaged Units</label>
+              <input type="number" min={0} value={damaged} onChange={e => setDamaged(Number(e.target.value))} required />
+            </div>
+            <div className="form-field">
+              <label>Baseline Forecast</label>
+              <input type="number" min={0} value={baselineForecast} onChange={e => setBaselineForecast(Number(e.target.value))} required />
+            </div>
+            {mode === 'DEMAND_CHANGE' && (
+              <div className="form-field form-field-full">
+                <label>Revised Forecast (Spike)</label>
+                <input type="number" min={0} value={revisedForecast} onChange={e => setRevisedForecast(Number(e.target.value))} required />
+              </div>
+            )}
+
+            <div className="form-section-title">Supplier 1 (Primary)</div>
+            <div className="form-field">
+              <label>Code</label>
+              <input value={supp1Code} onChange={e => setSupp1Code(e.target.value)} required />
+            </div>
+            <div className="form-field">
+              <label>Name</label>
+              <input value={supp1Name} onChange={e => setSupp1Name(e.target.value)} required />
+            </div>
+            <div className="form-field">
+              <label>Unit Cost (Minor: ₹1 = 100)</label>
+              <input type="number" min={1} value={supp1Cost} onChange={e => setSupp1Cost(Number(e.target.value))} required />
+            </div>
+            <div className="form-field">
+              <label>Max Quantity</label>
+              <input type="number" min={0} value={supp1Max} onChange={e => setSupp1Max(Number(e.target.value))} required />
+            </div>
+            <div className="form-field form-field-full">
+              <label>Reliability BPS (0-10000)</label>
+              <input type="number" min={0} max={10000} value={supp1Rel} onChange={e => setSupp1Rel(Number(e.target.value))} required />
+            </div>
+
+            <div className="form-section-title">Supplier 2 (Secondary / Alternate)</div>
+            <div className="form-field">
+              <label>Code</label>
+              <input value={supp2Code} onChange={e => setSupp2Code(e.target.value)} required />
+            </div>
+            <div className="form-field">
+              <label>Name</label>
+              <input value={supp2Name} onChange={e => setSupp2Name(e.target.value)} required />
+            </div>
+            <div className="form-field">
+              <label>Unit Cost (Minor: ₹1 = 100)</label>
+              <input type="number" min={1} value={supp2Cost} onChange={e => setSupp2Cost(Number(e.target.value))} required />
+            </div>
+            <div className="form-field">
+              <label>Max Quantity</label>
+              <input type="number" min={0} value={supp2Max} onChange={e => setSupp2Max(Number(e.target.value))} required />
+            </div>
+            <div className="form-field form-field-full">
+              <label>Reliability BPS (0-10000)</label>
+              <input type="number" min={0} max={10000} value={supp2Rel} onChange={e => setSupp2Rel(Number(e.target.value))} required />
+            </div>
+
+            <div className="form-section-title">Global Physical Limits</div>
+            <div className="form-field">
+              <label>Available Budget (Minor: ₹1 = 100)</label>
+              <input type="number" min={0} value={budgetAvailable} onChange={e => setBudgetAvailable(Number(e.target.value))} required />
+            </div>
+            <div className="form-field">
+              <label>Available Storage Volume</label>
+              <input type="number" min={0} value={storageVolume} onChange={e => setStorageVolume(Number(e.target.value))} required />
+            </div>
+            <div className="form-field form-field-full">
+              <label>Safety Stock</label>
+              <input type="number" min={0} value={safetyStock} onChange={e => setSafetyStock(Number(e.target.value))} required />
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>
+            <button type="submit" className="primary-button" disabled={busy}>
+              {busy ? 'Creating custom scenario…' : 'Run Custom Scenario'}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  )
 }
 
 function Calc({ label, value, hint, highlight }: { label: string; value: string; hint: string; highlight?: boolean }) { return <div className={`calc-card ${highlight ? 'highlight' : ''}`}><span>{label}</span><strong>{value}</strong><small>{hint}</small></div> }

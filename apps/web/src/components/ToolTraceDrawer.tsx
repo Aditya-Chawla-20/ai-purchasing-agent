@@ -1,0 +1,8 @@
+import { useState } from 'react'
+import { ShieldCheck } from 'lucide-react'
+import type { InvestigationTraceInfo } from '../api'
+
+export function ToolTraceDrawer({ trace }: { trace: InvestigationTraceInfo }) {
+  const [expanded, setExpanded] = useState(false)
+  return <div className="section-block investigation-block"><div className="section-title"><div><h3>Investigation trace</h3><p>{trace.rounds_used} model round{trace.rounds_used > 1 ? 's' : ''} used · {trace.tool_calls.length} typed tool calls</p></div><div className="investigation-tags"><span className={`policy-tag ${trace.mandatory_evidence_complete ? 'pass' : 'warning'}`}><ShieldCheck size={13} />{trace.mandatory_evidence_complete ? 'MANIFEST COMPLETE' : 'MANIFEST INCOMPLETE'}</span><button className="expand-toggle" onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>{expanded ? 'Hide tools' : 'View tools'}</button></div></div>{expanded && <div className="tool-calls-table"><div className="tool-calls-header"><span>Tool</span><span>Round</span><span>Status</span><span>Duration</span><span>Ref</span></div>{trace.tool_calls.map((call, index) => <div className="tool-call-row" key={`${call.tool_name}-${index}`}><span className="tool-name"><code>{call.tool_name}</code>{call.is_auto_filled && <span className="auto-tag">Auto-Filled</span>}</span><span>R{call.round_number}</span><span className={`tool-status ${call.status.toLowerCase()}`}>{call.status}</span><span>{call.latency_ms}ms</span><span className="tool-ref" title={call.result_ref ?? ''}>{call.result_ref ? `${call.result_ref.slice(0, 16)}…` : '—'}</span></div>)}</div>}</div>
+}

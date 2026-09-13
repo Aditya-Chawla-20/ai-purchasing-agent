@@ -192,3 +192,53 @@ body, .app-shell, .main-area, .topbar { background: #fff; color: #20283e; }.topb
 .constraint-list { gap: 5px 9px; }.constraint-row { padding: 6px 8px; }.result-card { margin: 9px 0; padding: 10px 12px; }.timeline { margin-top: 0; }.timeline-list { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 10px; }.timeline-row { padding: 4px 0; }.timeline-icon { width: 20px; height: 20px; }.timeline-row small { font-size: 6.5px; }
 @media (max-width: 760px) { .math-equation { grid-template-columns: repeat(3, minmax(0, 1fr)); }.evidence-list { grid-template-columns: 1fr; }.evidence-row:nth-child(odd) { border-right: 0; }.evidence-row:nth-last-child(-n + 2) { border-bottom: 1px solid #e8ecee; }.evidence-row:last-child { border-bottom: 0; }.timeline-list { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 520px) { .math-equation { grid-template-columns: repeat(2, minmax(0, 1fr)); }.timeline-list { grid-template-columns: 1fr; } }
+
+/* Expansion styles: Investigation trace, Sourcing allocation, Retry banner & Custom lab */
+.retry-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 12px 0; padding: 14px 18px; border-radius: 10px; background: #fff8eb; border: 1px solid #fbd38d; color: #744210; }
+.retry-content { display: flex; align-items: center; gap: 12px; }
+.retry-content strong { display: block; font-size: 13px; color: #975a16; }
+.retry-content p { margin: 3px 0 0; font-size: 11px; color: #b7791f; }
+.warning-icon { color: #dd6b20; flex-shrink: 0; }
+
+.investigation-block { margin-top: 12px; }
+.investigation-tags { display: flex; align-items: center; gap: 8px; }
+.expand-toggle { border: 1px solid #dce4e5; background: #fff; padding: 4px 10px; border-radius: 6px; font-size: 10px; font-weight: 600; color: #394355; cursor: pointer; }
+.expand-toggle:hover { background: #f0f4f5; }
+.tool-calls-table { margin-top: 10px; border: 1px solid #e2e7e8; border-radius: 8px; overflow: hidden; background: #fff; }
+.tool-calls-header { display: grid; grid-template-columns: 2fr 0.6fr 1fr 0.8fr 1.2fr; padding: 8px 12px; background: #f8fafb; border-bottom: 1px solid #e2e7e8; font-size: 10px; font-weight: 700; color: #697282; }
+.tool-call-row { display: grid; grid-template-columns: 2fr 0.6fr 1fr 0.8fr 1.2fr; align-items: center; padding: 8px 12px; border-bottom: 1px solid #f0f2f4; font-size: 11px; color: #2d3748; }
+.tool-call-row:last-child { border-bottom: 0; }
+.tool-name code { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #2b6cb0; }
+.auto-tag { margin-left: 6px; padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: 700; background: #feebc8; color: #c05621; }
+.tool-status { font-weight: 700; font-size: 10px; text-transform: uppercase; }
+.tool-status.succeeded { color: #2f855a; }
+.tool-status.failed { color: #c53030; }
+.tool-ref { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #718096; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.sourcing-plan-block { margin-top: 14px; }
+.sourcing-table-wrap, .actions-table-wrap { margin-top: 10px; border: 1px solid #e2e7e8; border-radius: 8px; overflow-x: auto; background: #fff; }
+.sourcing-table, .actions-table { width: 100%; border-collapse: collapse; font-size: 11px; text-align: left; }
+.sourcing-table th, .actions-table th { padding: 9px 12px; background: #f8fafb; border-bottom: 1px solid #e2e7e8; font-weight: 700; color: #697282; font-size: 10px; }
+.sourcing-table td, .actions-table td { padding: 9px 12px; border-bottom: 1px solid #f0f2f4; }
+.sourcing-table tr:last-child td, .actions-table tr:last-child td { border-bottom: 0; }
+.po-pill { display: inline-block; padding: 2px 7px; border-radius: 999px; font-size: 9px; font-weight: 700; background: #e2e8f0; color: #4a5568; }
+
+.supplier-assessments { margin-top: 12px; }
+.assessments-title { font-size: 10px; font-weight: 700; text-transform: uppercase; color: #718096; letter-spacing: 0.05em; display: block; margin-bottom: 6px; }
+.assessments-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
+.assessment-card { padding: 8px 10px; border-radius: 6px; border: 1px solid #e2e8f0; background: #fafafa; }
+.assessment-card.eligible { border-color: #9ad8ba; background: #f6fcf8; }
+.assessment-card.ineligible { border-color: #f0b4b4; background: #fff9f9; }
+.assessment-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 11px; }
+.reason-codes { display: flex; flex-wrap: wrap; gap: 4px; }
+.reason-code-tag { font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: #edf2f7; color: #4a5568; }
+
+.custom-lab-button { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px; border: 1px dashed #58c9c6; background: #f0faf9; color: #167c64; font-size: 10px; font-weight: 700; cursor: pointer; transition: all 0.2s; }
+.custom-lab-button:hover { background: #dff5f3; border-color: #38b2ac; }
+.custom-lab-modal { max-width: 680px; width: 90%; max-height: 85vh; overflow-y: auto; }
+.custom-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.form-field { display: flex; flex-direction: column; gap: 4px; }
+.form-field label { font-size: 10px; font-weight: 700; text-transform: uppercase; color: #4a5568; }
+.form-field input, .form-field select { padding: 6px 10px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 12px; }
+.form-field-full { grid-column: span 2; }
+.form-section-title { grid-column: span 2; font-size: 11px; font-weight: 800; color: #2d3748; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-top: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
