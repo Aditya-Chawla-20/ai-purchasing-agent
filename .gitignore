@@ -3,6 +3,12 @@
 .env.*
 !.env.example
 *.env
+*.pem
+*.key
+*.cert
+*.crt
+credentials.json
+token.json
 
 # Python & Virtual Environments
 .venv/
@@ -55,5 +61,11 @@ ehthumbs.db
 Thumbs.db
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
 *.sublime-project
 *.sublime-workspace
+
