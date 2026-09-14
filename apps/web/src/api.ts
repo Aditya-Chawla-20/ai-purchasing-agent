@@ -51,10 +51,15 @@ export type InvestigationToolCall = {
   result_ref?: string | null
   error_code?: string | null
   latency_ms: number
+  provider?: string
+  model?: string
+  source?: 'MODEL_SELECTED' | 'MANIFEST_AUTO_FILL'
 }
 
 export type InvestigationTraceInfo = {
   status: string
+  provider?: string | null
+  model?: string | null
   rounds_used: number
   mandatory_evidence_complete: boolean
   tool_calls: InvestigationToolCall[]
@@ -69,11 +74,14 @@ export type ActionItem = {
   total_minor: number | null
   currency: string | null
   idempotency_key: string
+  validation_status?: string | null
+  mismatch_codes?: string[]
 }
 
 export type Review = {
   id: string
   status: string
+  scenario_type?: string
   recovery_attempts?: number
   recommendation: Recommendation
   investigation?: InvestigationTraceInfo | null
@@ -82,12 +90,15 @@ export type Review = {
     version: number
     type: string
     original_quantity: number
+    raw_need?: number
     proposed_quantity: number
+    unresolved_quantity?: number
     confidence: string
     reason_codes: string[]
     calculations: Record<string, unknown>
     constraints: { code: string; passed: boolean; observed?: unknown; limit?: unknown }[]
     explanation: { summary: string; important_factors: { reason_code: string; evidence_refs: string[] }[]; constraint_summary: string; uncertainties: string[]; next_action: string }
+    explanation_source?: { provider: string; model: string | null }
   }
   sourcing_plan?: SourcingPlan | null
   approval: null | { status: string; proposal_id?: string | null; proposal_version: number; requested_at: string; decided_at: string | null; comment: string | null }
@@ -129,8 +140,8 @@ export const api = {
   recommendations: () => request<{ items: Recommendation[] }>('/recommendations'),
   startReview: (recommendation_id: string) => request<{ review_id: string; status: string }>('/reviews', { method: 'POST', body: JSON.stringify({ recommendation_id }), headers: { 'Idempotency-Key': crypto.randomUUID() } }),
   review: (id: string) => request<Review>(`/reviews/${id}`),
-  events: (id: string) => request<{ items: TimelineEvent[] }>(`/reviews/${id}/events`),
-  approve: (id: string, proposal_version: number) => request(`/reviews/${id}/approval`, { method: 'POST', body: JSON.stringify({ proposal_version, decision: 'APPROVE', comment: 'Reviewed proposal and constraints' }) }),
+  events: (id: string, afterId = 0) => request<{ items: TimelineEvent[] }>(`/reviews/${id}/events?after_id=${afterId}`),
+  approve: (id: string, proposal_version: number) => request<{ review_id: string; status: string; duplicate?: boolean }>(`/reviews/${id}/approval`, { method: 'POST', body: JSON.stringify({ proposal_version, decision: 'APPROVE', comment: 'Reviewed proposal and constraints' }) }),
   reject: (id: string, proposal_version: number, comment: string) => request(`/reviews/${id}/approval`, { method: 'POST', body: JSON.stringify({ proposal_version, decision: 'REJECT', comment }) }),
   retryExecution: (id: string, proposal_version: number) => request<{ review_id: string; status: string }>(`/reviews/${id}/execution-retry`, { method: 'POST', body: JSON.stringify({ proposal_version }) }),
   partialFixture: () => request<{ purchase_order_id: string; product_id: string; ordered_quantity: number; confirmed_quantity: number }>('/demo/partial-fulfilment'),

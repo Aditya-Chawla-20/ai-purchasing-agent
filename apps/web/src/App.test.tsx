@@ -76,5 +76,29 @@ describe('buyer decision workspace', () => {
     await waitFor(() => expect(apiMock.resetScenario).toHaveBeenCalledWith('inventory-conflict'))
     expect(await screen.findByText('Conflicting inventory counts')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('Guard confirmed')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /reset conflicting inventory counts testcase/i }))
+    await waitFor(() => expect(apiMock.resetScenario).toHaveBeenCalledTimes(2))
+  })
+
+  it('starts a fresh review from a terminal seeded result', async () => {
+    apiMock.startReview
+      .mockResolvedValueOnce({ review_id: 'review-old', status: 'CREATED' })
+      .mockResolvedValueOnce({ review_id: 'review-fresh', status: 'CREATED' })
+    apiMock.review.mockResolvedValue({
+      id: 'review-old', status: 'COMPLETED', recommendation: rec,
+      evidence: { items: [], completeness: 'COMPLETE', errors: [], snapshot_hash: 'hash' },
+      decision: {
+        version: 1, type: 'REJECT', original_quantity: 800, proposed_quantity: 0,
+        confidence: 'HIGH', reason_codes: ['NO_NET_REQUIREMENT'], calculations: {}, constraints: [],
+        explanation: { summary: 'No order.', important_factors: [], constraint_summary: 'Passed.', uncertainties: [], next_action: 'None.' },
+      },
+      approval: null, action: null, actions: [], validation: null,
+    })
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Royal Gala Apples' })
+    fireEvent.click(screen.getByRole('button', { name: /investigate recommendation/i }))
+    const rerun = await screen.findByRole('button', { name: /run again with fresh facts/i })
+    fireEvent.click(rerun)
+    await waitFor(() => expect(apiMock.startReview).toHaveBeenNthCalledWith(2, 'rec-1'))
   })
 })

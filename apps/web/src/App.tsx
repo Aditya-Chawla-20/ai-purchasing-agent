@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, ArrowRight, Boxes,
   Check, CheckCircle2, ChevronDown, CircleHelp, Clock3, FileCheck2, FileText,
@@ -35,6 +35,7 @@ function App() {
   const [review, setReview] = useState<Review | null>(null)
   const [reviewLoadFailedId, setReviewLoadFailedId] = useState<string | null>(null)
   const [events, setEvents] = useState<TimelineEvent[]>([])
+  const eventCursor = useRef(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [rejectOpen, setRejectOpen] = useState(false)
@@ -56,25 +57,48 @@ function App() {
   const reviewId = selected && !selected.startsWith('rec:') ? selected : null
 
   const loadReview = useCallback(async () => {
-    if (!reviewId) { setReview(null); setEvents([]); return }
+    if (!reviewId) { setReview(null); setEvents([]); eventCursor.current = 0; return null }
     setReviewLoadFailedId(null)
     try {
-      const [nextReview, nextEvents] = await Promise.all([api.review(reviewId), api.events(reviewId)])
+      const [nextReview, nextEvents] = await Promise.all([api.review(reviewId), api.events(reviewId, eventCursor.current)])
       setReview(nextReview)
-      setEvents(nextEvents.items)
+      if (nextEvents.items.length) {
+        setEvents(current => {
+          const knownIds = new Set(current.map(event => event.id))
+          const additions = nextEvents.items.filter(event => !knownIds.has(event.id))
+          return [...current, ...additions]
+        })
+        eventCursor.current = Math.max(eventCursor.current, nextEvents.items[nextEvents.items.length - 1].id)
+      }
+      return nextReview
     } catch (e) {
       setReviewLoadFailedId(reviewId)
       setError(e instanceof Error ? e.message : 'Unable to load review.')
+      return null
     }
   }, [reviewId])
 
   useEffect(() => { void loadRecommendations() }, [loadRecommendations])
   useEffect(() => {
+    eventCursor.current = 0
+    setEvents([])
+  }, [reviewId])
+  useEffect(() => {
     if (!reviewId || reviewLoadFailedId === reviewId) return
-    void loadReview()
-    if (review?.status === 'AWAITING_APPROVAL' || isTerminal(review?.status)) return
-    const timer = window.setInterval(() => { void loadReview() }, 1000)
-    return () => window.clearInterval(timer)
+    let stopped = false
+    let timer: number | undefined
+    const poll = async () => {
+      const latest = await loadReview()
+      const waitingForBuyer = latest?.status === 'AWAITING_APPROVAL' || latest?.status === 'AWAITING_EXECUTION_RETRY'
+      if (!stopped && latest && !waitingForBuyer && !isTerminal(latest.status)) {
+        timer = window.setTimeout(poll, 2500)
+      }
+    }
+    void poll()
+    return () => {
+      stopped = true
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
   }, [loadReview, reviewId, review?.status, reviewLoadFailedId])
 
   const selectedRecommendation = useMemo(() => {
@@ -83,11 +107,11 @@ function App() {
     return recommendations.find(item => item.id === id) ?? null
   }, [recommendationId, recommendations, review])
 
-  async function startReview() {
-    if (!recommendationId) return
+  async function startReview(targetRecommendationId = recommendationId) {
+    if (!targetRecommendationId) return
     setBusy(true); setError('')
     try {
-      const result = await api.startReview(recommendationId)
+      const result = await api.startReview(targetRecommendationId)
       setSelected(result.review_id)
       setNotice('Review started. Gathering evidence now.')
       window.setTimeout(() => setNotice(''), 3500)
@@ -100,9 +124,11 @@ function App() {
     if (!review?.decision) return
     setBusy(true); setError('')
     try {
-      await api.approve(review.id, review.decision.version)
+      const result = await api.approve(review.id, review.decision.version)
       setApproveOpen(false)
-      setNotice('Approval recorded. Revalidating facts before execution.')
+      setNotice(result.duplicate
+        ? `This approval was already processed. Current review status: ${result.status.replaceAll('_', ' ').toLowerCase()}. Check the latest evidence before taking another action.`
+        : 'Approval recorded. Revalidating facts before execution.')
       await loadReview()
     } catch (e) { setApproveOpen(false); await loadReview(); setError(e instanceof Error ? e.message : 'Approval failed.') }
     finally { setBusy(false) }
@@ -199,7 +225,7 @@ function App() {
         <div className="intelligence-ticker" aria-label="Purchasing intelligence status"><span>Evidence-led purchasing decisions</span><i /> <span>Human approval before every purchase order</span><i /> <span>Read-back validation after execution</span></div>
 
         <div className="content-wrap">
-          <section className="page-heading shop-hero"><div className="hero-copy"><div className="location-chip"><MapPin size={15} />Bengaluru Fulfilment Centre <ChevronDown size={14} /></div><h1>Purchasing intelligence<br />for <em>every decision.</em></h1><p>Stockwise investigates demand, supply, budget, and storage before a buyer approves an order.</p><div className="hero-actions"><button className="hero-primary" onClick={() => { if (recommendationId) void startReview() }} disabled={busy || !recommendationId}>{busy ? <LoaderCircle className="spin" size={16} /> : <PackageSearch size={16} />}{busy ? 'Checking recommendation' : recommendationId ? 'Review selected item' : 'Choose an item to review'}</button><button className="hero-secondary" onClick={simulatePartial} disabled={busy}><Activity size={16} />See supplier exception</button></div></div><div className="hero-delivery planning-scene" aria-hidden="true"><span className="hero-sticker one">LIVE MODEL</span><span className="hero-sticker two">8 checks</span><div className="hero-bag"><Boxes size={49} /><b>350</b><small>SAFE UNITS</small></div><span className="hero-route" /></div></section>
+          <section className="page-heading shop-hero"><div className="hero-copy"><div className="location-chip"><MapPin size={15} />Bengaluru Fulfilment Centre <ChevronDown size={14} /></div><h1>Purchasing intelligence<br />for <em>every decision.</em></h1><p>Stockwise investigates demand, supply, budget, and storage before a buyer approves an order.</p><div className="hero-actions"><button className="hero-primary" onClick={() => { if (recommendationId) void startReview() }} disabled={busy || !recommendationId}>{busy ? <LoaderCircle className="spin" size={16} /> : <PackageSearch size={16} />}{busy ? 'Checking recommendation' : recommendationId ? 'Review selected item' : 'Choose an item to review'}</button><button className="hero-secondary" onClick={simulatePartial} disabled={busy}><Activity size={16} />See supplier exception</button></div></div><div className="hero-delivery planning-scene" aria-hidden="true"><span className="hero-sticker one">GUARDED WORKFLOW</span><span className="hero-sticker two">8 checks</span><div className="hero-bag"><Boxes size={49} /><b>350</b><small>SAFE UNITS</small></div><span className="hero-route" /></div></section>
 
           <section className="metric-grid" aria-label="Purchasing overview">
             <Metric label="Needs your review" value={recommendations.filter(x => x.review_status === 'AWAITING_APPROVAL' || !x.review_status).length.toString().padStart(2, '0')} detail="Across all locations" icon={<FileText size={17} />} tone="violet" trend="Action needed" />
@@ -212,7 +238,7 @@ function App() {
           {notice && <div className="alert notice-alert"><Check size={16} />{notice}</div>}
 
           <section className="scenario-lab" aria-labelledby="scenario-lab-title">
-            <div className="scenario-lab-title"><span className="scenario-lab-icon"><FlaskConical size={16} /></span><div><h2 id="scenario-lab-title">Scenario Lab</h2><p>Resettable proof points for safety controls and multi-supplier allocation.</p></div></div>
+            <div className="scenario-lab-title"><span className="scenario-lab-icon"><FlaskConical size={16} /></span><div><h2 id="scenario-lab-title">Scenario Lab</h2><p>Resettable proof points for safety controls and multi-supplier allocation.</p></div>{scenario && <button className="expand-toggle scenario-reset-button" onClick={() => void resetScenario(scenario.scenario)} disabled={busy} aria-label={`Reset ${scenario.title} testcase`}>{busy ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}Reset this test case</button>}</div>
             <div className="scenario-options" aria-label="Choose a demo scenario">
               {scenarioChoices.map(([id, label]) => <button key={id} className={scenario?.scenario === id ? 'selected' : ''} aria-pressed={scenario?.scenario === id} onClick={() => void resetScenario(id)} disabled={busy}>{label}</button>)}
               <button className="custom-lab-button" onClick={() => setCustomLabOpen(true)} disabled={busy}><Sparkles size={14} /> Custom Scenario Lab</button>
@@ -231,7 +257,7 @@ function App() {
             </section>
 
             <section className="panel review-panel">
-              {!selectedRecommendation ? <div className="empty-review"><PackageSearch size={28} /><h3>Select a recommendation</h3><p>Choose an item from the queue to inspect its purchasing situation.</p></div> : !review ? <RecommendationDetail item={selectedRecommendation} busy={busy} onStart={startReview} /> : <ReviewDetail review={review} events={events} busy={busy} onApprove={() => setApproveOpen(true)} onReject={() => setRejectOpen(true)} onRetry={retryExecution} />}
+              {!selectedRecommendation ? <div className="empty-review"><PackageSearch size={28} /><h3>Select a recommendation</h3><p>Choose an item from the queue to inspect its purchasing situation.</p></div> : !review ? <RecommendationDetail item={selectedRecommendation} busy={busy} onStart={() => startReview()} /> : <ReviewDetail review={review} events={events} busy={busy} onApprove={() => setApproveOpen(true)} onReject={() => setRejectOpen(true)} onRetry={retryExecution} onRunAgain={() => startReview(review.recommendation.id)} />}
             </section>
           </div>
 
@@ -305,16 +331,18 @@ function ActionsList({ actions }: { actions: ActionItem[] }) {
               <th>External ID</th>
               <th>Status</th>
               <th>Amount</th>
+              <th>Validation</th>
               <th>Idempotency Key</th>
             </tr>
           </thead>
           <tbody>
             {actions.map((act) => (
-              <tr key={act.attempt_number}>
+              <tr key={`${act.idempotency_key}:${act.attempt_number}`}>
                 <td>{act.attempt_number}</td>
                 <td><strong>{act.external_id ?? act.purchase_order_id ?? '—'}</strong></td>
                 <td><span className={`status-pill ${act.status.toLowerCase()}`}>{act.status}</span></td>
-                <td>{money(Number(act.total_minor ?? 0), act.currency ?? 'INR')}</td>
+                <td>{act.total_minor !== null && act.currency ? money(act.total_minor, act.currency) : 'Unavailable'}</td>
+                <td><span className={`status-pill ${(act.validation_status ?? 'pending').toLowerCase()}`}>{act.validation_status ?? 'Pending'}</span>{act.mismatch_codes?.length ? <small>{act.mismatch_codes.join(', ')}</small> : null}</td>
                 <td className="font-mono text-muted">{act.idempotency_key.slice(-16)}</td>
               </tr>
             ))}
@@ -332,6 +360,7 @@ function ReviewDetail({
   onApprove,
   onReject,
   onRetry,
+  onRunAgain,
 }: {
   review: Review
   events: TimelineEvent[]
@@ -339,19 +368,22 @@ function ReviewDetail({
   onApprove: () => void
   onReject: () => void
   onRetry: () => void
+  onRunAgain: () => void
 }) {
   const decision = review.decision
   const statusLabel = review.status.replaceAll('_', ' ').toLowerCase()
   const calc = decision?.calculations ?? {}
+  const explanationProvider = decision?.explanation_source?.provider ?? 'template'
+  const explanationLabel = explanationProvider === 'template' ? 'Deterministic explanation' : `${humanize(explanationProvider)} explanation`
 
   return <>
-    <div className="detail-header"><div className="detail-ident"><span className="product-thumb large mint"><span>{review.recommendation.product.name.slice(0, 1)}</span><i /></span><div><div className="section-kicker">PURCHASE REVIEW <span className="review-ref">#{review.id.slice(0, 8).toUpperCase()}</span></div><h2>{review.recommendation.product.name}</h2><p>{review.recommendation.product.sku} <i /> {review.recommendation.node.name}</p></div></div><span className={`status-pill ${statusLabel.replaceAll(' ', '-')}`}>{statusLabel}</span></div>
+    <div className="detail-header"><div className="detail-ident"><span className="product-thumb large mint"><span>{review.recommendation.product.name.slice(0, 1)}</span><i /></span><div><div className="section-kicker">PURCHASE REVIEW <span className="review-ref">#{review.id.slice(0, 8).toUpperCase()}</span></div><h2>{review.recommendation.product.name}</h2><p>{review.recommendation.product.sku} <i /> {review.recommendation.node.name}</p></div></div><div className="detail-actions"><span className={`status-pill ${statusLabel.replaceAll(' ', '-')}`}>{statusLabel}</span>{isTerminal(review.status) && ['REC-800', 'REC-ACCEPT', 'REC-REJECT'].includes(review.recommendation.source_reference) && <button className="expand-toggle" onClick={onRunAgain} disabled={busy}>Run again with fresh facts</button>}</div></div>
 
     {review.status === 'AWAITING_EXECUTION_RETRY' && <ExecutionRetryBanner proposalVersion={review.decision?.version} busy={busy} onRetry={onRetry} />}
 
     {!decision && <div className="progress-card"><span className="progress-orb"><LoaderCircle className="spin" size={21} /></span><div><strong>Investigating the purchasing situation</strong><p>Collecting inventory, demand, open orders, supplier terms, budget and storage capacity.</p></div></div>}
     {decision && <>
-      <div className={`decision-banner ${decision.type.toLowerCase()}`}><div className="decision-symbol">{decision.type === 'INVESTIGATE' ? <AlertTriangle size={19} /> : decision.type === 'REJECT' ? <X size={19} /> : <Check size={19} />}</div><div className="decision-copy"><span className="section-kicker">DETERMINISTIC DECISION <span className="confidence">{decision.confidence} CONFIDENCE</span></span><h3>{decision.type === 'MODIFY' ? 'Adjust the recommended quantity' : decision.type === 'ACCEPT' ? 'Recommendation is supported' : decision.type === 'REJECT' ? 'No additional purchase needed' : 'More information is needed'}</h3><p><span className="ai-label">AI explanation</span> {decision.explanation.summary}</p></div><div className="decision-qty"><small>PROPOSED</small><strong>{decision.proposed_quantity.toLocaleString()}</strong><span>units</span></div></div>
+      <div className={`decision-banner ${decision.type.toLowerCase()}`}><div className="decision-symbol">{decision.type === 'INVESTIGATE' ? <AlertTriangle size={19} /> : decision.type === 'REJECT' ? <X size={19} /> : <Check size={19} />}</div><div className="decision-copy"><span className="section-kicker">DETERMINISTIC DECISION <span className="confidence">{decision.confidence} CONFIDENCE</span></span><h3>{decision.type === 'MODIFY' ? 'Adjust the recommended quantity' : decision.type === 'ACCEPT' ? 'Recommendation is supported' : decision.type === 'REJECT' ? 'No additional purchase needed' : 'More information is needed'}</h3><p><span className="ai-label">{explanationLabel}</span> {decision.explanation.summary}</p>{(decision.unresolved_quantity ?? 0) > 0 && <p><strong>{decision.unresolved_quantity?.toLocaleString()} units remain unresolved</strong> after the safe purchasing limits are applied.</p>}</div><div className="decision-qty"><small>PROPOSED</small><strong>{decision.proposed_quantity.toLocaleString()}</strong><span>units</span></div></div>
 
       {!!decision.explanation.important_factors.length && <div className="factor-list" aria-label="Decision reasons">{decision.explanation.important_factors.map(factor => <span key={factor.reason_code}>{humanize(factor.reason_code)}{factor.evidence_refs.length ? ` · ${factor.evidence_refs.map(humanize).join(', ')}` : ''}</span>)}</div>}
 
@@ -375,7 +407,7 @@ function ReviewDetail({
 
       <div className="section-block constraints-block"><div className="section-title"><div><h3>Constraint checks</h3><p>Every hard limit is validated before execution</p></div><span className="check-summary">{decision.constraints.filter(x => x.passed).length}/{decision.constraints.length} pass</span></div><div className="constraint-list">{decision.constraints.map(check => <div className="constraint-row" key={check.code}><span className={`constraint-icon ${check.passed ? 'pass' : 'fail'}`}>{check.passed ? <Check size={12} /> : <X size={12} />}</span><span>{humanize(check.code)}</span><small>{constraintDetail(check)}</small></div>)}</div></div>
 
-      {review.sourcing_plan && <SourcingPlanView plan={review.sourcing_plan} />}
+      {review.sourcing_plan && <SourcingPlanView plan={review.sourcing_plan} recovery={review.scenario_type === 'supplier-shortfall' || review.scenario_type === 'demand-change'} />}
 
       {review.status === 'AWAITING_APPROVAL' && <div className="approval-bar"><div><strong>Ready for your decision</strong><span>Proposal v{decision.version} · {money(Number(decision.calculations.total_cost_minor ?? 0), String(decision.calculations.currency ?? 'INR'))} total</span></div><div className="approval-actions"><button className="reject-button" onClick={onReject} disabled={busy}>Reject</button><button className="primary-button" onClick={onApprove} disabled={busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}Approve & create PO</button></div></div>}
 
@@ -384,7 +416,7 @@ function ReviewDetail({
       {review.actions && review.actions.length > 1 ? (
         <ActionsList actions={review.actions} />
       ) : review.action ? (
-        <div className={`result-card ${review.validation?.status === 'PASSED' ? 'success' : ''}`}><div className="result-icon">{review.validation?.status === 'PASSED' ? <CheckCircle2 size={18} /> : <FileCheck2 size={18} />}</div><div><strong>{review.validation?.status === 'PASSED' ? 'Purchase order created and validated' : 'Purchase order action recorded'}</strong><p>{review.action.external_id} · {money(Number(review.action.total_minor ?? 0), review.action.currency ?? 'INR')}</p></div><span className="validation-pill">{review.validation?.status ?? 'VALIDATING'}</span></div>
+        <div className={`result-card ${review.validation?.status === 'PASSED' ? 'success' : ''}`}><div className="result-icon">{review.validation?.status === 'PASSED' ? <CheckCircle2 size={18} /> : <FileCheck2 size={18} />}</div><div><strong>{review.validation?.status === 'PASSED' ? 'Purchase order created and validated' : 'Purchase order action recorded'}</strong><p>{review.action.external_id} · {review.action.total_minor !== null && review.action.currency ? money(review.action.total_minor, review.action.currency) : 'Unavailable'}</p></div><span className="validation-pill">{review.validation?.status ?? 'VALIDATING'}</span></div>
       ) : null}
 
       {review.status === 'NEEDS_ATTENTION' && <div className="needs-attention"><AlertTriangle size={17} /><div><strong>Buyer attention needed</strong><p>{review.evidence.errors.join(' · ') || decision.reason_codes.map(humanize).join(' · ')}</p></div></div>}
@@ -395,7 +427,8 @@ function ReviewDetail({
     {review.status === 'NEEDS_ATTENTION' && !decision && <div className="needs-attention"><AlertTriangle size={17} /><div><strong>Recovery limit reached</strong><p>Partial fulfilment could not be safely replanned after {review.recovery_attempts ?? 0} recovery attempts. No new purchase order was created.</p></div></div>}
     {review.status === 'FAILED' && <div className="needs-attention"><AlertTriangle size={17} /><div><strong>Review could not be completed</strong><p>Refresh the review and check the activity timeline before retrying.</p></div></div>}
 
-    <div className="timeline"><div className="section-title"><div><h3>Activity timeline</h3><p>Auditable steps in this review</p></div><span className="timeline-count">{events.length} events</span></div>{events.length ? <div className="timeline-list">{events.slice(-6).reverse().map(event => <div className="timeline-row" key={event.id}><span className="timeline-icon"><TimelineIcon type={event.event_type} /></span><div><strong>{humanize(event.event_type)}</strong><small>{new Date(event.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}{event.payload.quantity ? ` · ${event.payload.quantity} units` : ''}</small></div></div>)}</div> : <div className="timeline-empty">Activity will appear here as the review progresses.</div>}</div>
+    <div className="timeline"><div className="section-title"><div><h3>Activity timeline</h3><p>Auditable steps in this review</p></div><span className="timeline-count">{events.length} events</span></div>{events.length ? <div className="timeline-list">{events.slice(-6).reverse().map((event, idx) => <div className="timeline-row" key={`${event.id}-${event.event_type}-${idx}`}><span className="timeline-icon"><TimelineIcon type={event.event_type} /></span><div><strong>{humanize(event.event_type)}</strong><small>{new Date(event.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}{event.payload.quantity ? ` · ${event.payload.quantity} units` : ''}</small></div></div>)}</div> : <div className="timeline-empty">Activity will appear here as the review progresses.</div>}</div>
+
   </>
 }
 
