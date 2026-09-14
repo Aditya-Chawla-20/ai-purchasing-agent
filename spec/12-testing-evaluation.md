@@ -4,6 +4,8 @@
 
 Business correctness is evaluated deterministically. Agent quality is evaluated separately through required-information coverage, allowed tool usage, grounded explanation, and recovery behavior. A model judge is optional and is never the only correctness oracle.
 
+Scenario 1 may safely modify a recommendation to a constrained quantity and must expose `raw_need`, `proposed_quantity`, and the remaining `unresolved_quantity`. Supplier-shortfall and demand-recovery plans are stricter: incomplete recovery coverage is advisory only, produces `INVESTIGATE`/`NEEDS_ATTENTION`, and cannot be approved or executed.
+
 ## 2. Test layers
 
 ### Unit tests

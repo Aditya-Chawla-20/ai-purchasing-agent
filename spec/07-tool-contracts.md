@@ -222,7 +222,7 @@ Defaults are configuration, recorded with the run:
 - Gemini uses `gemini-3.8-flash` as primary.
 - Groq explanations may use `groq/compound`; custom tools use `GROQ_AGENT_MODEL`, default `openai/gpt-oss-120b`.
 - NVIDIA Nemotron is explanation-only until its configured model passes tool declaration, argument, multi-call, and error-turn contract tests.
-- A provider that returns prose instead of a required call, an unknown tool, duplicate call, or invalid schema consumes the current model round and is never dispatched.
+- A provider that returns no valid tool calls (including prose-only output) is a failed provider attempt and immediately advances to the tool-capable fallback. Unknown, duplicate, or invalid calls are never dispatched. The mandatory manifest may auto-fill omitted facts only after at least one valid model-selected call and records `MANIFEST_AUTO_FILL` provenance.
 - For post-approval invocation, each configured tool-capable provider receives one attempt to call the sole exposed tool. Invalid output advances to the next provider; exhaustion creates no write and waits for authorized retry.
 
 Tests use a frozen clock. Production-like adapters may tighten these values.

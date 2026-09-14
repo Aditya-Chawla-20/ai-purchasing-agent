@@ -1,6 +1,6 @@
 # AI Purchasing Agent
 
-A small buyer workspace for reviewing purchase recommendations, grounding a deterministic decision in operational evidence, obtaining buyer approval, creating one idempotent purchase order, and validating the persisted result. The main demo modifies the seeded 800-unit recommendation to 450 units; a partial-supplier-confirmation path recomputes the remaining need.
+A buyer workspace for bounded, provider-native investigation of purchase recommendations, deterministic policy and supplier allocation, exact-version buyer approval, idempotent purchase-order execution, and per-order read-back validation. The main demo modifies the seeded 800-unit recommendation to 450 units; supplier shortfalls can create a validated multi-supplier recovery plan, and demand signals can open a supplemental review.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ flowchart LR
     Audit --> Store
 ```
 
-The model only phrases a decision from a closed, typed package. Python owns quantities, constraints, approval checks, and writes. The configured provider falls through to explicitly configured backup providers, then to a deterministic explanation if every provider is missing, unavailable, slow, or returns invalid output. No Ollama, RAG, vector database, multi-agent framework, or external service is required.
+Gemini, with a tool-capable Groq fallback, selects from scoped read functions inside a bounded investigation. A mandatory manifest may label and fill facts omitted by a successful model round. Provider exhaustion stops safely in `NEEDS_ATTENTION`; it never becomes a manifest-only “agent” success. Python remains authoritative for quantities, constraints, supplier allocation, approvals, writes, and validation. Explanation wording has independent Gemini/Groq/NVIDIA failover and a clearly labelled deterministic template fallback. No Ollama, RAG, vector database, or multi-agent framework is required.
 
 ## Approach and safety model
 
@@ -51,7 +51,7 @@ pnpm --dir apps/web dev
 
 Open the Vite URL (normally `http://localhost:5173`). The API runs at `http://localhost:8000`; interactive API docs are at `/docs`. Seed fixtures are added on API startup and are safe to re-run.
 
-The application works without an API key using its deterministic explanation. To enable model wording, add provider keys to `.env`; `LLM_PROVIDER=gemini` is primary by default and `LLM_FALLBACK_PROVIDERS=groq,nvidia` specifies the ordered backups. Provider model names, OpenAI-compatible base URLs, and request timeout are configurable there. Keep `.env` local; do not commit credentials. Choose Groq only after measuring the configured provider’s latency with a representative prompt.
+Set `LLM_ENABLED=true` and provide Gemini and/or Groq credentials for the agentic investigation. Gemini is the primary tool provider and `GROQ_AGENT_MODEL` is its tool-capable fallback. Explanation wording separately follows `LLM_PROVIDER` and `LLM_FALLBACK_PROVIDERS`, including NVIDIA where configured. Keep `.env` local; never commit credentials. With `LLM_ENABLED=false`, tests use a scripted provider so correctness remains network-independent.
 
 ## Verify
 
@@ -94,7 +94,7 @@ See [spec/14-demo-runbook.md](spec/14-demo-runbook.md) for the detailed walkthro
 
 Use the 800-unit flow as the primary end-to-end scenario. It proves that the system gathers several independent facts, modifies an unsafe recommendation, requires human approval, creates exactly one PO, and validates the observed result. Then run the supplier-exception control to show that a 250-of-500 confirmation recalculates coverage before proposing another action.
 
-Scenario 3 (a demand spike) is intentionally outside this MVP. The assignment requires at least one end-to-end scenario and prioritizes depth, feedback, and validation over implementing all four scenarios.
+Scenario 3 is implemented through versioned recent-sales and revised-forecast evidence. A confirmed spike either completes without action when coverage is sufficient, produces an approval-gated supplemental sourcing plan when full recovery is feasible, or stops in `NEEDS_ATTENTION` with an advisory partial plan when global constraints prevent full recovery. Scenario 4 constraints apply throughout Scenarios 1-3.
 
 ## Clean setup check
 

@@ -112,6 +112,8 @@ Use server state as the source of truth. A small query layer handles fetching, p
 - Empty recommendations: explain how to load seed data.
 - Partial evidence failure: retain successful evidence and show which source failed.
 - LLM unavailable: display the deterministic explanation without degrading decision controls.
+- The hero uses a neutral guarded-workflow label. A review may claim a live provider only when its trace includes a successful model-selected call; manifest auto-fill is labelled separately with its actual source.
+- Every decision displays raw need, proposed purchase quantity, and any unresolved quantity. Missing PO monetary data displays `Unavailable`, never a zero-value substitute, and every action row displays its own validation outcome.
 - Network failure: show retry without discarding a typed rejection comment.
 - Investigation exhausted: list failed/missing tools and show a safe needs-attention outcome.
 - Action provider unavailable: retain the approved proposal and offer execution retry; never imply the PO exists.

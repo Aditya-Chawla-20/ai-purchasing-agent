@@ -16,7 +16,7 @@ The AI Purchasing Agent turns an untrusted purchase recommendation into an expla
 
 ## Positioning
 
-The system separates model-generated explanation from purchasing correctness: deterministic policy owns quantities, constraints, approvals, and writes.
+The system separates model-selected investigation and generated explanation from purchasing correctness: deterministic policy owns quantities, constraints, allocation, approvals, writes, and validation.
 
 ## Operating Context
 
@@ -27,7 +27,7 @@ Buyers work in a purchasing queue across fulfilment nodes. The primary review ca
 - React and TypeScript buyer workspace with FastAPI backend.
 - Evidence snapshots include inventory, forecast, open POs, supplier terms, budget, storage, and planning policy.
 - Purchase-order writes require buyer approval and read-back validation.
-- Gemini is the primary explanation provider with Groq and NVIDIA failover; model availability must not affect correctness.
+- Gemini is the primary native tool-calling provider with a tool-capable Groq fallback; Gemini, Groq Compound, and NVIDIA may phrase explanations independently. Investigation-provider exhaustion stops safely, while explanation-provider exhaustion uses a labelled deterministic template.
 - The MVP intentionally excludes demand-spike handling.
 
 ## Brand Commitments
