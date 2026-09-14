@@ -5,10 +5,11 @@ from unittest.mock import patch
 
 import pytest
 from purchasing.application.demo_scenarios import _restore_baseline
-from purchasing.application.providers import BaseToolProvider, ProviderCoordinator
+from purchasing.application.providers import BaseToolProvider, ProviderCoordinator, ToolCallRequest
 from purchasing.application.tools import ToolContext, ToolDispatcher, ToolResponse
 from purchasing.infrastructure.db import SessionLocal
 from purchasing.infrastructure.models import (
+    AuditEvent,
     Forecast,
     InvestigationTrace,
     Node,
@@ -17,6 +18,7 @@ from purchasing.infrastructure.models import (
     Recommendation,
     Supplier,
 )
+from purchasing.workflow import graph
 from sqlalchemy import select
 
 
@@ -191,6 +193,17 @@ def test_ev015_bounded_tool_calling_limits(client):
         assert not exceeded.ok
         assert exceeded.error_code == "TOOL_LIMIT_REACHED"
 
+        audit = session.scalar(
+            select(AuditEvent)
+            .where(AuditEvent.review_id == review.id, AuditEvent.event_type == "TOOL_CALL_COMPLETED")
+            .order_by(AuditEvent.id.desc())
+        )
+        assert audit is not None
+        assert audit.payload_json["display_name"] == "Read demand forecast"
+        assert audit.payload_json["status"] == "FAILED"
+        assert audit.payload_json["error_code"] == "TOOL_LIMIT_REACHED"
+        assert audit.payload_json["scope"] == "Product and fulfilment-node scope"
+
 
 def test_ev016_provider_coordinator_fallback():
     """EV-016: ProviderCoordinator handles tool provider fallbacks and actions cleanly."""
@@ -223,6 +236,43 @@ def test_ev016_provider_coordinator_fallback():
             context={"scenario_type": "recommendation-review"},
         )
         assert len(calls) > 0
+
+
+def test_repeated_provider_call_cannot_erase_successful_evidence(monkeypatch):
+    """A late retry failure must not turn an already-read fact into missing evidence."""
+    with SessionLocal() as session:
+        rec, product, node, supplier, _, _ = _get_seeded_context(session)
+        review = PurchasingReview(
+            recommendation_id=rec.id,
+            scenario_type="recommendation-review",
+            status="COLLECTING_EVIDENCE",
+            idempotency_key=f"repeated-tool-{uuid_suffix()}",
+        )
+        session.add(review)
+        session.commit()
+
+    class RepeatingCoordinator:
+        def run_investigation_round(self, situation, already_collected, round_number):
+            return (
+                "fake-provider",
+                "repeat-model",
+                [ToolCallRequest("get_inventory", {"product_id": product.id, "node_id": node.id})],
+            )
+
+        def drain_failures(self):
+            return []
+
+    monkeypatch.setattr(graph, "ProviderCoordinator", RepeatingCoordinator)
+    inputs, payload, collected = graph._collect_tool_evidence(
+        review=review,
+        recommendation=rec,
+        scenario_type="recommendation-review",
+    )
+
+    assert collected["get_inventory"].ok
+    assert inputs.evidence_complete
+    inventory = next(item for item in payload["evidence"] if item["name"] == "inventory")
+    assert inventory["status"] == "FRESH"
 
 
 def test_empty_tool_calls_are_a_failed_provider_attempt():

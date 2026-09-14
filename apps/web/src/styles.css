@@ -204,16 +204,16 @@ body, .app-shell, .main-area, .topbar { background: #fff; color: #20283e; }.topb
 .investigation-tags { display: flex; align-items: center; gap: 8px; }
 .expand-toggle { border: 1px solid #dce4e5; background: #fff; padding: 4px 10px; border-radius: 6px; font-size: 10px; font-weight: 600; color: #394355; cursor: pointer; }
 .expand-toggle:hover { background: #f0f4f5; }
+.scenario-reset-button { display: inline-flex; min-height: 30px; flex: 0 0 auto; align-items: center; gap: 6px; margin-left: auto; white-space: nowrap; }
+.scenario-reset-button:focus-visible { outline: 2px solid #58c9c6; outline-offset: 2px; }
+@media (max-width: 760px) { .scenario-reset-button { margin-left: 41px; } }
 .tool-calls-table { margin-top: 10px; border: 1px solid #e2e7e8; border-radius: 8px; overflow: hidden; background: #fff; }
-.tool-calls-header { display: grid; grid-template-columns: 2fr 0.6fr 1fr 0.8fr 1.2fr; padding: 8px 12px; background: #f8fafb; border-bottom: 1px solid #e2e7e8; font-size: 10px; font-weight: 700; color: #697282; }
-.tool-call-row { display: grid; grid-template-columns: 2fr 0.6fr 1fr 0.8fr 1.2fr; align-items: center; padding: 8px 12px; border-bottom: 1px solid #f0f2f4; font-size: 11px; color: #2d3748; }
+.tool-calls-header { display: grid; grid-template-columns: 1.25fr 1fr 1.6fr .55fr; gap: 12px; padding: 8px 12px; background: #f8fafb; border-bottom: 1px solid #e2e7e8; font-size: 10px; font-weight: 700; color: #697282; }
+.tool-call-row { display: grid; grid-template-columns: 1.25fr 1fr 1.6fr .55fr; gap: 12px; align-items: start; padding: 9px 12px; border-bottom: 1px solid #f0f2f4; font-size: 11px; color: #2d3748; }
 .tool-call-row:last-child { border-bottom: 0; }
-.tool-name code { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #2b6cb0; }
+.tool-name { display: flex; flex-direction: column; gap: 3px; min-width: 0; }.tool-name strong { color: #2c3747; font-size: 11px; }.tool-name code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'JetBrains Mono', monospace; font-size: 9px; color: #607282; }
 .auto-tag { margin-left: 6px; padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: 700; background: #feebc8; color: #c05621; }
-.tool-status { font-weight: 700; font-size: 10px; text-transform: uppercase; }
-.tool-status.succeeded { color: #2f855a; }
-.tool-status.failed { color: #c53030; }
-.tool-ref { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #718096; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-name .auto-tag { width: fit-content; margin-left: 0; }.tool-scope { color: #65717d; font-size: 10px; line-height: 1.4; }.tool-result { display: flex; flex-direction: column; gap: 3px; min-width: 0; }.tool-result b { color: #237a5e; font-size: 10px; }.tool-result.failed b { color: #b84646; }.tool-result small { color: #6d7883; font-size: 9px; line-height: 1.35; }.tool-timing { display: flex; flex-direction: column; gap: 3px; color: #65717d; font-size: 10px; white-space: nowrap; }.tool-timing small { color: #94a0aa; font-size: 9px; }
 
 .sourcing-plan-block { margin-top: 14px; }
 .sourcing-table-wrap, .actions-table-wrap { margin-top: 10px; border: 1px solid #e2e7e8; border-radius: 8px; overflow-x: auto; background: #fff; }

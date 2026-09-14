@@ -493,6 +493,64 @@ READ_TOOL_FUNCTIONS = {
 
 READ_ONLY_TOOLS: list[str] = list(READ_TOOL_FUNCTIONS.keys())
 
+# These labels and summaries are deliberately produced by application code, not
+# model prose. They make the audit trail useful to a buyer without persisting a
+# provider response or any hidden model reasoning.
+TOOL_AUDIT_LABELS = {
+    "get_inventory": "Read inventory position",
+    "get_demand_forecast": "Read demand forecast",
+    "list_open_purchase_orders": "Check incoming purchase orders",
+    "get_supplier_terms": "Read supplier terms",
+    "get_budget": "Check purchase budget",
+    "get_storage_capacity": "Check storage capacity",
+    "get_planning_policy": "Read replenishment policy",
+    "get_purchase_order": "Read purchase order",
+    "list_supplier_options": "Compare supplier options",
+    "get_recent_sales": "Read recent sales velocity",
+}
+
+
+def _audit_result_summary(tool_name: str, response: ToolResponse) -> str:
+    """Return a compact, safe operational result for the buyer-facing audit log."""
+    if not response.ok:
+        return "No evidence was accepted; the workflow will apply its safety guard."
+
+    data = response.data
+    if tool_name == "get_inventory":
+        return f"Usable stock: {data.get('usable_on_hand', 0)} units."
+    if tool_name == "get_demand_forecast":
+        return f"Expected demand: {data.get('expected_demand', 0)} units."
+    if tool_name == "list_open_purchase_orders":
+        return f"Eligible incoming: {data.get('eligible_incoming_quantity', 0)} units across {len(data.get('items', []))} order(s)."
+    if tool_name == "get_supplier_terms":
+        return f"MOQ {data.get('minimum_order_quantity', 0)} · available {data.get('max_available_quantity', 0)} units."
+    if tool_name == "get_budget":
+        return f"Available budget: {data.get('available_minor', 0)} {data.get('currency', '')}."
+    if tool_name == "get_storage_capacity":
+        return f"Available storage: {data.get('available_volume', 0)} volume units."
+    if tool_name == "get_planning_policy":
+        return f"Safety stock: {data.get('safety_stock', 0)} units · review period: {data.get('review_period_days', 0)} days."
+    if tool_name == "list_supplier_options":
+        return f"Compared {len(data.get('candidates', []))} supplier option(s)."
+    if tool_name == "get_recent_sales":
+        return f"Sales velocity: {data.get('units_sold', 0)} units in {data.get('hours', 0)} hours."
+    if tool_name == "get_purchase_order":
+        return f"Purchase order status: {data.get('status', 'recorded')}."
+    return "Evidence captured."
+
+
+def _audit_scope_summary(arguments: dict[str, Any]) -> str:
+    """Describe validated scope without surfacing opaque internal identifiers."""
+    if "purchase_order_id" in arguments:
+        return "Approved purchase-order scope"
+    if "supplier_id" in arguments:
+        return "Approved supplier and product scope"
+    if "product_id" in arguments and "node_id" in arguments:
+        return "Product and fulfilment-node scope"
+    if "node_id" in arguments:
+        return "Fulfilment-node scope"
+    return "Current review scope"
+
 TOOL_ARGUMENTS: dict[str, tuple[set[str], set[str]]] = {
     "get_inventory": ({"product_id", "node_id"}, {"product_id", "node_id"}),
     "get_demand_forecast": ({"product_id", "node_id"}, {"product_id", "node_id", "forecast_id"}),
@@ -566,7 +624,7 @@ class ToolDispatcher:
             raise RuntimeError("A short-lived database session is required to dispatch a tool")
 
         if self.total_calls >= self.max_total_calls:
-            return ToolResponse(
+            response = ToolResponse(
                 ok=False,
                 data={},
                 source="dispatcher",
@@ -575,6 +633,26 @@ class ToolDispatcher:
                 error_code="TOOL_LIMIT_REACHED",
                 warnings=[f"Exceeded max total calls ({self.max_total_calls})"],
             )
+            record_event(
+                self.session,
+                self.review_id,
+                "TOOL_CALL_COMPLETED",
+                {
+                    "tool": tool_name,
+                    "display_name": TOOL_AUDIT_LABELS.get(tool_name, "Run approved read tool"),
+                    "status": "FAILED",
+                    "round": round_number,
+                    "duration_ms": int((perf_counter() - started) * 1000),
+                    "error_code": response.error_code,
+                    "summary": _audit_result_summary(tool_name, response),
+                    "scope": _audit_scope_summary(call_args),
+                    "source": response.source,
+                    "provider": provider,
+                    "model": model,
+                    "attempt": 0,
+                },
+            )
+            return response
 
         self.sequence += 1
         arg_key = f"{tool_name}:{json.dumps(call_args, sort_keys=True)}"
@@ -668,10 +746,17 @@ class ToolDispatcher:
             "TOOL_CALL_COMPLETED",
             {
                 "tool": tool_name,
+                "display_name": TOOL_AUDIT_LABELS.get(tool_name, "Run approved read tool"),
                 "status": "SUCCEEDED" if resp.ok else "FAILED",
                 "round": round_number,
                 "duration_ms": duration_ms,
                 "error_code": resp.error_code,
+                "summary": _audit_result_summary(tool_name, resp),
+                "scope": _audit_scope_summary(call_args),
+                "source": resp.source,
+                "provider": provider,
+                "model": model,
+                "attempt": self.calls_by_normalized_key.get(arg_key, 1),
             },
         )
         return resp

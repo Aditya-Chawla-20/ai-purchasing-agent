@@ -202,7 +202,11 @@ def _collect_tool_evidence(
                     call.tool_name, round_number=round_number, args=call.arguments,
                     provider=provider, model=model,
                 )
-                collected[call.tool_name] = response
+                # A provider may repeat a read in a later round. Preserve the
+                # first valid fact: a rejected duplicate/retry must not erase
+                # evidence that was already collected successfully.
+                if response.ok or call.tool_name not in collected:
+                    collected[call.tool_name] = response
                 if response.ok and call.tool_name not in selected:
                     selected.append(call.tool_name)
             dispatch_session.commit()

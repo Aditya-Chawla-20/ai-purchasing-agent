@@ -18,6 +18,7 @@ import { CustomScenarioModal } from './components/CustomScenarioModal'
 import { ExecutionRetryBanner } from './components/ExecutionRetryBanner'
 import { SourcingPlanView } from './components/SourcingPlanView'
 import { ToolTraceDrawer } from './components/ToolTraceDrawer'
+import { readableError, toolAuditLabel } from './components/toolAudit'
 
 const scenarioChoices = [
   ['inventory-conflict', 'Inventory conflict'],
@@ -382,6 +383,7 @@ function ReviewDetail({
     {review.status === 'AWAITING_EXECUTION_RETRY' && <ExecutionRetryBanner proposalVersion={review.decision?.version} busy={busy} onRetry={onRetry} />}
 
     {!decision && <div className="progress-card"><span className="progress-orb"><LoaderCircle className="spin" size={21} /></span><div><strong>Investigating the purchasing situation</strong><p>Collecting inventory, demand, open orders, supplier terms, budget and storage capacity.</p></div></div>}
+    {review.investigation && !decision && <ToolTraceDrawer trace={review.investigation} />}
     {decision && <>
       <div className={`decision-banner ${decision.type.toLowerCase()}`}><div className="decision-symbol">{decision.type === 'INVESTIGATE' ? <AlertTriangle size={19} /> : decision.type === 'REJECT' ? <X size={19} /> : <Check size={19} />}</div><div className="decision-copy"><span className="section-kicker">DETERMINISTIC DECISION <span className="confidence">{decision.confidence} CONFIDENCE</span></span><h3>{decision.type === 'MODIFY' ? 'Adjust the recommended quantity' : decision.type === 'ACCEPT' ? 'Recommendation is supported' : decision.type === 'REJECT' ? 'No additional purchase needed' : 'More information is needed'}</h3><p><span className="ai-label">{explanationLabel}</span> {decision.explanation.summary}</p>{(decision.unresolved_quantity ?? 0) > 0 && <p><strong>{decision.unresolved_quantity?.toLocaleString()} units remain unresolved</strong> after the safe purchasing limits are applied.</p>}</div><div className="decision-qty"><small>PROPOSED</small><strong>{decision.proposed_quantity.toLocaleString()}</strong><span>units</span></div></div>
 
@@ -427,7 +429,7 @@ function ReviewDetail({
     {review.status === 'NEEDS_ATTENTION' && !decision && <div className="needs-attention"><AlertTriangle size={17} /><div><strong>Recovery limit reached</strong><p>Partial fulfilment could not be safely replanned after {review.recovery_attempts ?? 0} recovery attempts. No new purchase order was created.</p></div></div>}
     {review.status === 'FAILED' && <div className="needs-attention"><AlertTriangle size={17} /><div><strong>Review could not be completed</strong><p>Refresh the review and check the activity timeline before retrying.</p></div></div>}
 
-    <div className="timeline"><div className="section-title"><div><h3>Activity timeline</h3><p>Auditable steps in this review</p></div><span className="timeline-count">{events.length} events</span></div>{events.length ? <div className="timeline-list">{events.slice(-6).reverse().map((event, idx) => <div className="timeline-row" key={`${event.id}-${event.event_type}-${idx}`}><span className="timeline-icon"><TimelineIcon type={event.event_type} /></span><div><strong>{humanize(event.event_type)}</strong><small>{new Date(event.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}{event.payload.quantity ? ` · ${event.payload.quantity} units` : ''}</small></div></div>)}</div> : <div className="timeline-empty">Activity will appear here as the review progresses.</div>}</div>
+    <div className="timeline"><div className="section-title"><div><h3>Activity timeline</h3><p>Auditable steps in this review</p></div><span className="timeline-count">{events.length} events</span></div>{events.length ? <div className="timeline-list">{events.slice(-10).reverse().map((event, idx) => { const copy = timelineCopy(event); return <div className="timeline-row" key={`${event.id}-${event.event_type}-${idx}`}><span className="timeline-icon"><TimelineIcon type={event.event_type} /></span><div><strong>{copy.title}</strong><small>{new Date(event.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}{copy.detail ? ` · ${copy.detail}` : ''}</small></div></div> })}</div> : <div className="timeline-empty">Activity will appear here as the review progresses.</div>}</div>
 
   </>
 }
@@ -703,7 +705,25 @@ function EvidenceRow({ fact, index }: { fact: Evidence; index: number }) {
   return <div className="evidence-row"><span className={`evidence-icon ${fact.status.toLowerCase()}`}>{icons[index % icons.length]}</span><span className="evidence-name"><strong>{label}</strong><small>{detail}</small></span><span className={`evidence-state ${fact.status.toLowerCase()}`}>{fact.status === 'FRESH' ? <Check size={11} /> : <AlertTriangle size={11} />}{fact.status.toLowerCase()}</span></div>
 }
 
-function TimelineIcon({ type }: { type: string }) { if (type.includes('DECISION')) return <Sparkles size={13} />; if (type.includes('APPROVAL')) return <Check size={13} />; if (type.includes('VALIDATION')) return <FileCheck2 size={13} />; if (type.includes('ACTION')) return <PackageCheck size={13} />; if (type.includes('ESCALATED')) return <AlertTriangle size={13} />; return <Activity size={13} /> }
+function timelineCopy(event: TimelineEvent): { title: string; detail: string } {
+  if (event.event_type === 'TOOL_CALL_COMPLETED') {
+    const tool = typeof event.payload.tool === 'string' ? event.payload.tool : undefined
+    const title = typeof event.payload.display_name === 'string' ? event.payload.display_name : toolAuditLabel(tool)
+    const failed = event.payload.status === 'FAILED'
+    const summary = typeof event.payload.summary === 'string' ? event.payload.summary : ''
+    const errorCode = typeof event.payload.error_code === 'string' ? event.payload.error_code : undefined
+    const duration = typeof event.payload.duration_ms === 'number' ? `${event.payload.duration_ms}ms` : ''
+    return { title, detail: [failed ? readableError(errorCode) : summary || 'Evidence captured.', duration].filter(Boolean).join(' · ') }
+  }
+  if (event.event_type === 'INVESTIGATION_PROVIDER_FAILED') {
+    const provider = typeof event.payload.provider === 'string' ? event.payload.provider : 'Provider'
+    const failure = typeof event.payload.failure_code === 'string' ? event.payload.failure_code.replaceAll('_', ' ').toLowerCase() : 'unavailable'
+    return { title: `${humanize(provider)} tool planning failed safely`, detail: `Fallback available · ${failure}` }
+  }
+  return { title: humanize(event.event_type), detail: event.payload.quantity ? `${event.payload.quantity} units` : '' }
+}
+
+function TimelineIcon({ type }: { type: string }) { if (type.includes('TOOL')) return <Activity size={13} />; if (type.includes('DECISION')) return <Sparkles size={13} />; if (type.includes('APPROVAL')) return <Check size={13} />; if (type.includes('VALIDATION')) return <FileCheck2 size={13} />; if (type.includes('ACTION')) return <PackageCheck size={13} />; if (type.includes('ESCALATED')) return <AlertTriangle size={13} />; return <Activity size={13} /> }
 function num(value: unknown): string { return Number(value ?? 0).toLocaleString('en-IN') }
 function valueAt(items: Evidence[], name: string, key: string): unknown { const fact = items.find(x => x.name === name); return typeof fact?.value === 'object' && fact.value !== null ? (fact.value as Record<string, unknown>)[key] : key === 'value' ? fact?.value : 0 }
 function humanize(value: string): string { return value.toLowerCase().replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase()) }
