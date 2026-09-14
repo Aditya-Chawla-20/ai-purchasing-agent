@@ -233,3 +233,78 @@ def seed_demo_data(session: Session) -> None:
         )
     )
     session.commit()
+
+
+FRESH_SEEDED_REFERENCES = {"REC-800", "REC-ACCEPT", "REC-REJECT"}
+
+
+def refresh_seeded_demo_facts(session: Session, recommendation: Recommendation) -> bool:
+    """Refresh volatile timestamps for repeatable normal demos without touching snapshots.
+
+    Scenario Lab and the deliberately stale REC-INVESTIGATE fixture are intentionally
+    excluded. Values are preserved; only the current operational observations move.
+    """
+    if recommendation.source_reference not in FRESH_SEEDED_REFERENCES:
+        return False
+    now = datetime.now(UTC)
+    inventory = session.scalar(
+        select(Inventory).where(
+            Inventory.product_id == recommendation.product_id,
+            Inventory.node_id == recommendation.node_id,
+        )
+    )
+    policy = session.scalar(
+        select(NodeProductPolicy).where(
+            NodeProductPolicy.product_id == recommendation.product_id,
+            NodeProductPolicy.node_id == recommendation.node_id,
+        )
+    )
+    forecast = session.scalar(
+        select(Forecast)
+        .where(
+            Forecast.product_id == recommendation.product_id,
+            Forecast.node_id == recommendation.node_id,
+        )
+        .order_by(Forecast.observed_at.desc())
+        .limit(1)
+    )
+    supplier_terms = session.scalars(
+        select(SupplierProduct).where(SupplierProduct.product_id == recommendation.product_id)
+    ).all()
+    budget = session.scalar(
+        select(Budget)
+        .where(Budget.node_id == recommendation.node_id)
+        .order_by(Budget.observed_at.desc())
+        .limit(1)
+    )
+    storage = session.scalar(
+        select(StorageCapacity)
+        .where(StorageCapacity.node_id == recommendation.node_id)
+        .order_by(StorageCapacity.observed_at.desc())
+        .limit(1)
+    )
+    for fact in [inventory, policy, forecast, budget, storage, *supplier_terms]:
+        if fact is not None:
+            fact.observed_at = now
+    if forecast:
+        forecast.window_start = now - timedelta(days=1)
+        duration = 8 if recommendation.source_reference == "REC-800" else 6
+        forecast.window_end = now + timedelta(days=duration)
+    if budget:
+        budget.period_start = now - timedelta(days=1)
+        budget.period_end = now + timedelta(days=30)
+    purchase_orders = session.scalars(
+        select(PurchaseOrder)
+        .join(PurchaseOrderItem, PurchaseOrderItem.purchase_order_id == PurchaseOrder.id)
+        .where(
+            PurchaseOrder.node_id == recommendation.node_id,
+            PurchaseOrderItem.product_id == recommendation.product_id,
+            PurchaseOrder.status.in_(["OPEN", "CONFIRMED"]),
+        )
+    ).all()
+    for purchase_order in purchase_orders:
+        purchase_order.updated_at = now
+        if purchase_order.idempotency_key == "seed-open-po-1":
+            purchase_order.expected_delivery_at = now + timedelta(days=3)
+    session.flush()
+    return True

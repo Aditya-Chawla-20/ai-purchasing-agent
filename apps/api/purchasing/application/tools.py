@@ -827,7 +827,13 @@ def tool_execute_approved_proposal(
                 review_id=review_id, decision_id=proposal.decision_id, sourcing_plan_line_id=line.id,
                 attempt_number=1, action_type="CREATE_PO", idempotency_key=line.idempotency_key,
                 request_json={"supplier_id": line.supplier_id, "quantity": line.quantity, "total_minor": line.total_cost_minor},
-                response_json={"purchase_order_id": po.id, "external_id": po.external_id}, status="SUCCEEDED",
+                response_json={
+                    "purchase_order_id": po.id,
+                    "external_id": po.external_id,
+                    "total_minor": po.total_minor,
+                    "currency": po.currency,
+                },
+                status="SUCCEEDED",
                 started_at=now, completed_at=now,
             )
             session.add(attempt)

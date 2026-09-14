@@ -18,6 +18,7 @@ from purchasing.application.audit import record_event
 from purchasing.application.demand import evaluate_demand_signal
 from purchasing.application.demo_scenarios import advance_scenario, reset_scenario
 from purchasing.application.evidence import collect_inputs
+from purchasing.application.seeding import refresh_seeded_demo_facts
 from purchasing.domain.policy import DecisionType, calculate_decision
 from purchasing.infrastructure.db import get_session
 from purchasing.infrastructure.models import (
@@ -220,6 +221,7 @@ def create_review(
             "status": existing.status,
             "links": {"self": f"/api/v1/reviews/{existing.id}"},
         }
+    refresh_seeded_demo_facts(session, recommendation)
     review = PurchasingReview(
         recommendation_id=recommendation.id, status="CREATED", idempotency_key=idempotency_key
     )
@@ -262,6 +264,15 @@ def get_review(review_id: str, session: Session = Depends(get_session), role=Dep
         select(Decision)
         .where(Decision.review_id == review.id)
         .order_by(Decision.version.desc())
+        .limit(1)
+    )
+    explanation_event = session.scalar(
+        select(AuditEvent)
+        .where(
+            AuditEvent.review_id == review.id,
+            AuditEvent.event_type == "EXPLANATION_GENERATED",
+        )
+        .order_by(AuditEvent.id.desc())
         .limit(1)
     )
     approval = session.scalar(
@@ -310,6 +321,21 @@ def get_review(review_id: str, session: Session = Depends(get_session), role=Dep
         .where(ActionAttempt.review_id == review.id)
         .order_by(ActionAttempt.attempt_number.asc())
     ).all()
+    attempt_purchase_orders = {
+        action.id: session.get(
+            PurchaseOrder, (action.response_json or {}).get("purchase_order_id")
+        )
+        for action in all_attempts
+        if (action.response_json or {}).get("purchase_order_id")
+    }
+    attempt_validations = {
+        row.action_attempt_id: row
+        for row in session.scalars(
+            select(ValidationResult)
+            .where(ValidationResult.review_id == review.id)
+            .order_by(ValidationResult.observed_at.desc())
+        ).all()
+    }
     tool_calls = (
         session.scalars(
             select(AgentToolCall)
@@ -345,6 +371,7 @@ def get_review(review_id: str, session: Session = Depends(get_session), role=Dep
     return {
         "id": review.id,
         "status": review.status,
+        "scenario_type": review.scenario_type or "recommendation-review",
         "recovery_attempts": review.recovery_attempts,
         "recommendation": {
             "id": recommendation.id,
@@ -356,8 +383,10 @@ def get_review(review_id: str, session: Session = Depends(get_session), role=Dep
         },
         "investigation": {
             "status": trace.status if trace else "PENDING",
+            "provider": trace.provider if trace and trace.rounds_used else None,
+            "model": trace.model if trace and trace.rounds_used else None,
             "rounds_used": trace.rounds_used if trace else 0,
-            "mandatory_evidence_complete": bool(trace.completed_at or trace.status == "COMPLETED") if trace else False,
+            "mandatory_evidence_complete": trace.status == "COMPLETED" if trace else False,
             "tool_calls": [
                 {
                     "tool_name": tc.tool_name,
@@ -368,6 +397,13 @@ def get_review(review_id: str, session: Session = Depends(get_session), role=Dep
                     "result_ref": tc.result_ref,
                     "error_code": tc.error_code,
                     "latency_ms": tc.duration_ms,
+                    "provider": tc.provider,
+                    "model": tc.model,
+                    "source": (
+                        "MANIFEST_AUTO_FILL"
+                        if tc.provider == "mandatory-manifest-guard"
+                        else "MODEL_SELECTED"
+                    ),
                 }
                 for tc in tool_calls
             ],
@@ -383,12 +419,20 @@ def get_review(review_id: str, session: Session = Depends(get_session), role=Dep
                 "version": decision.version,
                 "type": decision.decision_type,
                 "original_quantity": decision.original_quantity,
+                "raw_need": decision.raw_need,
                 "proposed_quantity": decision.proposed_quantity,
+                "unresolved_quantity": max(decision.raw_need - decision.proposed_quantity, 0),
                 "confidence": decision.confidence_label,
                 "reason_codes": decision.reason_codes_json,
                 "calculations": decision.calculation_json,
                 "constraints": decision.calculation_json.get("constraints", []),
                 "explanation": decision.explanation_json,
+                "explanation_source": {
+                    "provider": (explanation_event.payload_json or {}).get("provider", "template")
+                    if explanation_event else "template",
+                    "model": (explanation_event.payload_json or {}).get("model")
+                    if explanation_event else None,
+                },
             }
             if decision
             else None
@@ -460,9 +504,29 @@ def get_review(review_id: str, session: Session = Depends(get_session), role=Dep
                 "status": a.status,
                 "purchase_order_id": (a.response_json or {}).get("purchase_order_id"),
                 "external_id": (a.response_json or {}).get("external_id"),
-                "total_minor": (a.response_json or {}).get("total_minor"),
-                "currency": (a.response_json or {}).get("currency"),
+                "total_minor": (
+                    (a.response_json or {}).get("total_minor")
+                    if (a.response_json or {}).get("total_minor") is not None
+                    else attempt_purchase_orders.get(a.id).total_minor
+                    if attempt_purchase_orders.get(a.id)
+                    else None
+                ),
+                "currency": (
+                    (a.response_json or {}).get("currency")
+                    or (
+                        attempt_purchase_orders.get(a.id).currency
+                        if attempt_purchase_orders.get(a.id)
+                        else None
+                    )
+                ),
                 "idempotency_key": a.idempotency_key,
+                "validation_status": (
+                    attempt_validations[a.id].status if a.id in attempt_validations else None
+                ),
+                "mismatch_codes": (
+                    attempt_validations[a.id].mismatch_codes_json
+                    if a.id in attempt_validations else []
+                ),
             }
             for a in all_attempts
         ],
@@ -579,8 +643,10 @@ def get_review_tool_trace(
         "review_id": review_id,
         "investigation": {
             "status": trace.status if trace else "PENDING",
+            "provider": trace.provider if trace and trace.rounds_used else None,
+            "model": trace.model if trace and trace.rounds_used else None,
             "rounds_used": trace.rounds_used if trace else 0,
-            "mandatory_evidence_complete": bool(trace.completed_at or trace.status == "COMPLETED") if trace else False,
+            "mandatory_evidence_complete": trace.status == "COMPLETED" if trace else False,
             "tool_calls": [
                 {
                     "tool_name": tc.tool_name,
@@ -591,6 +657,13 @@ def get_review_tool_trace(
                     "result_ref": tc.result_ref,
                     "error_code": tc.error_code,
                     "latency_ms": tc.duration_ms,
+                    "provider": tc.provider,
+                    "model": tc.model,
+                    "source": (
+                        "MANIFEST_AUTO_FILL"
+                        if tc.provider == "mandatory-manifest-guard"
+                        else "MODEL_SELECTED"
+                    ),
                 }
                 for tc in tool_calls
             ],
@@ -666,6 +739,16 @@ def decide_approval(
                 "detail": "This proposal already has a different buyer response.",
             },
         )
+    # Approval may be accepted and then superseded during the mandatory
+    # pre-execution refresh. A browser retry of that same click must replay the
+    # recorded result, not look like a new conflicting decision.
+    if approval_request.status == "SUPERSEDED" and approval_request.decided_at:
+        same_replay = (
+            body.decision == "APPROVE"
+            and approval_request.comment == (body.comment.strip() or None)
+        )
+        if same_replay:
+            return {"review_id": review_id, "status": review.status, "duplicate": True}
     if (
         review.status != "AWAITING_APPROVAL"
         or approval_request.status != "PENDING"

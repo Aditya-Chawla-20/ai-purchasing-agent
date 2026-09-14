@@ -1,11 +1,14 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from purchasing.infrastructure.db import SessionLocal
 from purchasing.infrastructure.models import (
+    Forecast,
     Inventory,
+    NodeProductPolicy,
     PurchaseOrder,
     PurchaseOrderItem,
     Recommendation,
+    SupplierProduct,
 )
 from purchasing.settings import settings
 from sqlalchemy import select
@@ -30,7 +33,16 @@ def test_main_review_pauses_for_approval_then_creates_and_validates_po(client):
     review = client.get(f"/api/v1/reviews/{review_id}").json()
     assert review["status"] == "AWAITING_APPROVAL"
     assert review["decision"]["type"] == "MODIFY"
+    assert review["decision"]["raw_need"] == 500
     assert review["decision"]["proposed_quantity"] == 450
+    assert review["decision"]["unresolved_quantity"] == 50
+    assert review["decision"]["calculations"]["proposed_quantity"] == 450
+    assert "450" in review["decision"]["explanation"]["summary"]
+    assert review["sourcing_plan"]["total_quantity"] == 450
+    assert (
+        review["sourcing_plan"]["total_cost_minor"]
+        == review["decision"]["calculations"]["total_cost_minor"]
+    )
     assert {item["name"] for item in review["evidence"]["items"]} == {
         "inventory",
         "supplier_terms",
@@ -53,6 +65,7 @@ def test_main_review_pauses_for_approval_then_creates_and_validates_po(client):
     final = client.get(f"/api/v1/reviews/{review_id}").json()
     assert final["status"] == "COMPLETED"
     assert final["action"]["status"] == "SUCCEEDED"
+    assert final["action"]["total_minor"] == final["sourcing_plan"]["total_cost_minor"]
     assert final["validation"]["status"] == "PASSED"
     assert {
         "supplier_id",
@@ -86,6 +99,29 @@ def test_main_review_pauses_for_approval_then_creates_and_validates_po(client):
     )
     assert replay.status_code == 202
     assert replay.json()["status"] == "COMPLETED"
+
+
+def test_new_normal_review_refreshes_volatile_seed_facts(client):
+    item = recommendation(client, "REC-REJECT")
+    old = datetime.now(UTC) - timedelta(days=3)
+    with SessionLocal() as session:
+        rec = session.get(Recommendation, item["id"])
+        inventory = session.get(Inventory, (rec.product_id, rec.node_id))
+        forecast = session.scalar(
+            select(Forecast).where(
+                Forecast.product_id == rec.product_id, Forecast.node_id == rec.node_id
+            )
+        )
+        policy = session.get(NodeProductPolicy, (rec.product_id, rec.node_id))
+        terms = session.get(SupplierProduct, (rec.preferred_supplier_id, rec.product_id))
+        for fact in (inventory, forecast, policy, terms):
+            fact.observed_at = old
+        session.commit()
+
+    response = start(client, "REC-REJECT", "test-fresh-normal-rerun")
+    review = client.get(f"/api/v1/reviews/{response.json()['review_id']}").json()
+    assert review["status"] == "COMPLETED"
+    assert all(fact["status"] == "FRESH" for fact in review["evidence"]["items"])
 
 
 def test_no_need_recommendation_completes_without_purchase_order(client):
@@ -153,6 +189,12 @@ def test_changed_inventory_supersedes_approval_and_requires_new_proposal(client)
     assert refreshed["decision"]["proposed_quantity"] == 400
     assert refreshed["approval"]["proposal_version"] == 2
     assert refreshed["action"] is None
+    replay = client.post(
+        f"/api/v1/reviews/{review_id}/approval",
+        json={"proposal_version": 1, "decision": "APPROVE", "comment": "Recheck first."},
+    )
+    assert replay.status_code == 202
+    assert replay.json() == {"review_id": review_id, "status": "AWAITING_APPROVAL", "duplicate": True}
     stale = client.post(
         f"/api/v1/reviews/{review_id}/approval",
         json={"proposal_version": 1, "decision": "APPROVE", "comment": "Old version."},

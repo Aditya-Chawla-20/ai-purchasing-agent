@@ -225,6 +225,54 @@ def test_ev016_provider_coordinator_fallback():
         assert len(calls) > 0
 
 
+def test_empty_tool_calls_are_a_failed_provider_attempt():
+    class EmptyProvider(BaseToolProvider):
+        provider_name = "empty"
+        model_name = "empty-model"
+
+        def generate_investigation_calls(self, *args, **kwargs):
+            return []
+
+    class WorkingProvider(BaseToolProvider):
+        provider_name = "working"
+        model_name = "working-model"
+
+        def generate_investigation_calls(self, *args, **kwargs):
+            from purchasing.application.providers import ToolCallRequest
+
+            return [ToolCallRequest("get_inventory", {"product_id": "p", "node_id": "n"})]
+
+    coordinator = ProviderCoordinator(EmptyProvider(), WorkingProvider())
+    provider, model, calls = coordinator.run_investigation_round({}, [], 1)
+
+    assert (provider, model) == ("working", "working-model")
+    assert len(calls) == 1
+    assert coordinator.drain_failures()[0]["failure_code"] == "EMPTY_TOOL_CALLS"
+
+
+def test_both_empty_providers_stop_review_without_manifest_success(client):
+    class EmptyProvider(BaseToolProvider):
+        provider_name = "empty"
+        model_name = "empty-model"
+
+        def generate_investigation_calls(self, *args, **kwargs):
+            return []
+
+    coordinator = ProviderCoordinator(EmptyProvider(), EmptyProvider())
+    with patch("purchasing.workflow.graph.ProviderCoordinator", return_value=coordinator):
+        response = client.post(
+            "/api/v1/demo/scenarios/late-incoming-po/reset",
+            headers={"X-Demo-Role": "BUYER"},
+        )
+
+    review = client.get(f"/api/v1/reviews/{response.json()['review_id']}").json()
+    assert review["status"] == "NEEDS_ATTENTION"
+    assert review["investigation"]["status"] == "PROVIDER_EXHAUSTED"
+    assert review["investigation"]["mandatory_evidence_complete"] is False
+    assert review["investigation"]["tool_calls"] == []
+    assert review["approval"] is None
+
+
 def test_ev017_awaiting_execution_retry_on_provider_failure_and_recovery(client):
     """EV-017: Provider failure leads to AWAITING_EXECUTION_RETRY, preserving approval until retry."""
     res = client.post(
@@ -293,10 +341,16 @@ def test_ev018_and_ev019_multi_supplier_shortfall_allocation_and_execution(clien
     sourcing_plan = review["sourcing_plan"]
     assert sourcing_plan is not None
 
-    # Preferred supplier SUP-01 has max 300; raw need is 600 -> plan allocates to both SUP-01 and SUP-02
-    assert len(sourcing_plan["lines"]) >= 2
+    # Fixture coverage is 250 units against a 700 target: exactly 450 units
+    # must be recovered through two suppliers.
+    assert review["decision"]["raw_need"] == 450
+    assert review["decision"]["proposed_quantity"] == 450
+    assert review["decision"]["unresolved_quantity"] == 0
+    assert sourcing_plan["raw_need"] == 450
+    assert len(sourcing_plan["lines"]) == 2
     total_alloc = sum(line["allocated_quantity"] for line in sourcing_plan["lines"])
-    assert total_alloc >= 450
+    assert total_alloc == 450
+    assert sorted(line["allocated_quantity"] for line in sourcing_plan["lines"]) == [200, 250]
 
     # Approve the multi-line proposal
     appr_res = client.post(
@@ -315,7 +369,10 @@ def test_ev018_and_ev019_multi_supplier_shortfall_allocation_and_execution(clien
     assert final_review["validation"]["status"] == "PASSED"
 
     # Both purchase orders exist and are recorded in actions
-    assert len(final_review["actions"]) >= 2
+    assert len(final_review["actions"]) == 2
+    assert all(action["total_minor"] for action in final_review["actions"])
+    assert all(action["currency"] == "INR" for action in final_review["actions"])
+    assert all(action["validation_status"] == "PASSED" for action in final_review["actions"])
     po_ids = {act["purchase_order_id"] for act in final_review["actions"]}
     assert len(po_ids) >= 2
 
@@ -363,7 +420,13 @@ def test_ev021_and_ev022_demand_spike_detection_and_deduplication(client):
 
         # 3. Check demand review
         review = client.get(f"/api/v1/reviews/{review_id}").json()
-        assert review["status"] in {"AWAITING_APPROVAL", "COMPLETED"}
+        # The revised demand creates a 750-unit recovery need, while the seeded
+        # global storage/budget limits cover only 450. Recovery plans require
+        # full coverage, so the partial allocation remains advisory and no PO is approved.
+        assert review["status"] == "NEEDS_ATTENTION"
+        assert review["decision"]["type"] == "INVESTIGATE"
+        assert review["approval"] is None
+        assert review["actions"] == []
 
 
 def test_ev023_custom_scenario_lab_execution(client):

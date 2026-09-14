@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -314,7 +315,16 @@ class GroqToolProvider(BaseToolProvider):
         client = OpenAI(api_key=self.api_key, base_url=settings.groq_base_url, timeout=settings.llm_timeout_seconds)
         response = client.chat.completions.create(
             model=self.model_name,
-            messages=[{"role": "system", "content": "Use only the supplied functions. Never invent purchasing facts."}, {"role": "user", "content": prompt}],
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a function router. Invoke one or more supplied functions now. "
+                        "Do not describe, name, or list functions in prose. Never invent purchasing facts."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
             tools=[{"type": "function", "function": schema} for schema in schemas],
             tool_choice="required",
             temperature=0,
@@ -324,7 +334,7 @@ class GroqToolProvider(BaseToolProvider):
 
     def plan_investigation_round(self, situation: dict[str, Any], already_collected: list[str], round_number: int) -> list[ToolCallRequest]:
         return self._generate(
-            "Select read functions needed for the review. "
+            "Invoke the read functions needed for this review now; respond only with function calls. "
             f"Situation: {json.dumps(situation, default=str)}. Collected: {already_collected}. Round {round_number}/3.",
             TOOL_SCHEMAS,
         )
@@ -340,6 +350,7 @@ class ProviderCoordinator:
     """Ordered, capability-aware failover. The fake provider is test-only, never production fallback."""
 
     def __init__(self, primary_provider: BaseToolProvider | None = None, fallback_provider: BaseToolProvider | None = None):
+        self.failures: list[dict[str, Any]] = []
         if primary_provider is not None:
             self._primary = primary_provider
             self.fallback = fallback_provider
@@ -387,17 +398,34 @@ class ProviderCoordinator:
         already_collected: list[str],
         round_number: int,
     ) -> tuple[str, str, list[ToolCallRequest]]:
-        try:
-            calls = self._call_investigation(self.primary, situation, already_collected, round_number)
-            p_name = getattr(self.primary, "provider_name", "primary")
-            m_name = getattr(self.primary, "model_name", "model")
-            return p_name, m_name, calls
-        except Exception as e:
-            if self.fallback is None:
-                raise RuntimeError("No tool-capable provider is available") from e
-            logger.warning("Primary provider %s failed: %s. Trying Groq.", getattr(self.primary, "provider_name", "primary"), e)
-            calls = self._call_investigation(self.fallback, situation, already_collected, round_number)
-            return self.fallback.provider_name, self.fallback.model_name, calls
+        providers = [self.primary] + ([self.fallback] if self.fallback else [])
+        last_error: Exception | None = None
+        for provider in providers:
+            started = time.perf_counter()
+            try:
+                calls = self._call_investigation(
+                    provider, situation, already_collected, round_number
+                )
+                if not calls:
+                    raise RuntimeError("Provider returned no tool calls")
+                return provider.provider_name, provider.model_name, calls
+            except Exception as exc:
+                last_error = exc
+                code = "EMPTY_TOOL_CALLS" if str(exc) == "Provider returned no tool calls" else "PROVIDER_UNAVAILABLE"
+                self.failures.append(
+                    {
+                        "provider": provider.provider_name,
+                        "model": provider.model_name,
+                        "failure_code": code,
+                        "duration_ms": round((time.perf_counter() - started) * 1000),
+                    }
+                )
+                logger.warning("Tool provider %s failed: %s", provider.provider_name, exc)
+        raise RuntimeError("No tool-capable provider is available") from last_error
+
+    def drain_failures(self) -> list[dict[str, Any]]:
+        failures, self.failures = self.failures, []
+        return failures
 
     def investigate_round(
         self,

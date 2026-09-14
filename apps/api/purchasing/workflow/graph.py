@@ -22,7 +22,7 @@ from purchasing.application.tools import (
     complete_mandatory_manifest,
     tool_execute_approved_proposal,
 )
-from purchasing.domain.policy import DecisionType, calculate_decision
+from purchasing.domain.policy import DecisionType, PurchaseDecision, calculate_decision
 from purchasing.infrastructure.db import SessionLocal
 from purchasing.infrastructure.models import (
     ActionAttempt,
@@ -41,6 +41,7 @@ from purchasing.infrastructure.models import (
     ValidationResult,
     new_id,
 )
+from purchasing.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,70 @@ class ReviewState(TypedDict, total=False):
     action_attempt_id: str
     validation_status: str
     route: str
+
+
+def _persist_final_decision(
+    session,
+    review: PurchasingReview,
+    saved: Decision,
+    decision: PurchaseDecision,
+    evidence_errors: list[str],
+) -> str:
+    """Persist every buyer-visible decision field from one immutable final object."""
+    normalized_constraints = []
+    for constraint in decision.constraints:
+        updates: dict[str, Any] = {}
+        if constraint.code in {"INTEGER_QUANTITY", "MOQ_SATISFIED", "WITHIN_STORAGE", "NEED_JUSTIFIED"}:
+            updates["observed"] = decision.proposed_quantity
+        elif constraint.code == "WITHIN_BUDGET":
+            updates["observed"] = decision.total_cost_minor
+        elif constraint.code == "WITHIN_SUPPLIER_AVAILABILITY":
+            updates["observed"] = decision.proposed_quantity
+            if constraint.limit is not None and decision.proposed_quantity > constraint.limit:
+                updates["limit"] = decision.proposed_quantity
+        normalized_constraints.append(constraint.model_copy(update=updates))
+    decision = decision.model_copy(update={"constraints": tuple(normalized_constraints)})
+    explanation, provider = ExplanationProvider().explain(decision, evidence_errors)
+    saved.decision_type = decision.decision.value
+    saved.original_quantity = decision.original_quantity
+    saved.raw_need = decision.raw_need
+    saved.proposed_quantity = decision.proposed_quantity
+    saved.confidence_label = decision.confidence.value
+    saved.reason_codes_json = list(decision.reason_codes)
+    saved.calculation_json = decision.model_dump(mode="json", exclude={"evidence"})
+    saved.explanation_json = explanation.model_dump(mode="json")
+    record_event(
+        session,
+        review.id,
+        "DECISION_CALCULATED",
+        {
+            "decision": decision.decision.value,
+            "quantity": decision.proposed_quantity,
+            "raw_need": decision.raw_need,
+            "unresolved_quantity": max(decision.raw_need - decision.proposed_quantity, 0),
+            "reason_codes": list(decision.reason_codes),
+            "policy_version": review.policy_version,
+        },
+    )
+    explanation_models = {
+        "gemini": settings.gemini_model,
+        "groq": settings.groq_model,
+        "nvidia": settings.nvidia_model,
+    }
+    record_event(
+        session,
+        review.id,
+        "EXPLANATION_GENERATED",
+        {"provider": provider, "model": explanation_models.get(provider)},
+    )
+    if provider == "template":
+        record_event(
+            session,
+            review.id,
+            "EXPLANATION_FALLBACK_USED",
+            {"reason": "UNAVAILABLE_OR_INVALID"},
+        )
+    return provider
 
 
 def _evidence_fingerprint(payload: dict[str, Any]) -> str:
@@ -105,14 +170,28 @@ def _collect_tool_evidence(
         "scenario_type": scenario_type,
     }
     rounds_run = 0
+    provider_exhausted = False
+    successful_provider: tuple[str, str] | None = None
     for round_number in range(1, 4):
         try:
             provider, model, calls = coordinator.run_investigation_round(situation, selected, round_number)
         except Exception as exc:
             logger.warning("Investigation provider unavailable: %s", exc)
+            provider_exhausted = True
+            with SessionLocal() as failure_session:
+                for failure in coordinator.drain_failures():
+                    record_event(
+                        failure_session, review.id, "INVESTIGATION_PROVIDER_FAILED", failure
+                    )
+                failure_session.commit()
             break
-        if not calls:
-            break
+        with SessionLocal() as failure_session:
+            for failure in coordinator.drain_failures():
+                record_event(
+                    failure_session, review.id, "INVESTIGATION_PROVIDER_FAILED", failure
+                )
+            failure_session.commit()
+        successful_provider = (provider, model)
         rounds_run = round_number
         with SessionLocal() as dispatch_session:
             dispatcher.session = dispatch_session
@@ -127,23 +206,40 @@ def _collect_tool_evidence(
                 if response.ok and call.tool_name not in selected:
                     selected.append(call.tool_name)
             dispatch_session.commit()
-    with SessionLocal() as manifest_session:
-        dispatcher.session = manifest_session
-        collected = complete_mandatory_manifest(
-            session=manifest_session, dispatcher=dispatcher, scenario_type=scenario_type,
-            product_id=recommendation.product_id, node_id=recommendation.node_id,
-            preferred_supplier_id=recommendation.preferred_supplier_id, collected_tools=collected,
-        )
-        manifest_session.commit()
+        required = set(MANDATORY_MANIFESTS.get(
+            scenario_type, MANDATORY_MANIFESTS["recommendation-review"]
+        )) - {"get_purchase_order"}
+        if required.issubset(selected):
+            break
+    if successful_provider:
+        with SessionLocal() as manifest_session:
+            dispatcher.session = manifest_session
+            collected = complete_mandatory_manifest(
+                session=manifest_session, dispatcher=dispatcher, scenario_type=scenario_type,
+                product_id=recommendation.product_id, node_id=recommendation.node_id,
+                preferred_supplier_id=recommendation.preferred_supplier_id, collected_tools=collected,
+            )
+            manifest_session.commit()
     if trace_id:
         with SessionLocal() as trace_session:
             trace = trace_session.get(InvestigationTrace, trace_id)
             if trace:
+                if successful_provider:
+                    trace.provider, trace.model = successful_provider
                 trace.rounds_used = rounds_run
-                trace.status = "COMPLETED" if all(result.ok for result in collected.values()) else "DEFICIENT"
+                trace.status = (
+                    "PROVIDER_EXHAUSTED"
+                    if provider_exhausted
+                    else "COMPLETED" if all(result.ok for result in collected.values()) else "DEFICIENT"
+                )
                 trace.completed_at = datetime.now(UTC)
                 trace_session.commit()
-    return (*build_inputs_from_tool_results(recommendation, collected), collected)
+    inputs, payload = build_inputs_from_tool_results(recommendation, collected)
+    if provider_exhausted:
+        payload["evidence_complete"] = False
+        payload.setdefault("errors", []).append("investigation provider exhausted")
+        inputs = inputs.model_copy(update={"evidence_complete": False})
+    return inputs, payload, collected
 
 
 def _prepare(state: ReviewState) -> dict:
@@ -214,7 +310,6 @@ def _prepare(state: ReviewState) -> dict:
         review.status = "EVALUATING"
         decision = calculate_decision(inputs, payload.get("budget_currency"))
         decision_id = new_id()
-        explanation, provider = ExplanationProvider().explain(decision, payload.get("errors"))
         saved = Decision(
             id=decision_id,
             review_id=review.id,
@@ -227,7 +322,7 @@ def _prepare(state: ReviewState) -> dict:
             confidence_label=decision.confidence.value,
             reason_codes_json=list(decision.reason_codes),
             calculation_json=decision.model_dump(mode="json", exclude={"evidence"}),
-            explanation_json=explanation.model_dump(mode="json"),
+            explanation_json={},
         )
         session.add(saved)
         session.flush()
@@ -241,26 +336,8 @@ def _prepare(state: ReviewState) -> dict:
                 "errors": payload["errors"],
             },
         )
-        record_event(
-            session,
-            review.id,
-            "DECISION_CALCULATED",
-            {
-                "decision": decision.decision.value,
-                "quantity": decision.proposed_quantity,
-                "reason_codes": list(decision.reason_codes),
-                "policy_version": review.policy_version,
-            },
-        )
-        record_event(session, review.id, "EXPLANATION_GENERATED", {"provider": provider})
-        if provider == "template":
-            record_event(
-                session,
-                review.id,
-                "EXPLANATION_FALLBACK_USED",
-                {"reason": "UNAVAILABLE_OR_INVALID"},
-            )
         if decision.decision == DecisionType.INVESTIGATE:
+            _persist_final_decision(session, review, saved, decision, payload.get("errors", []))
             review.status = "NEEDS_ATTENTION"
             record_event(
                 session,
@@ -271,6 +348,7 @@ def _prepare(state: ReviewState) -> dict:
             session.commit()
             return {"decision_id": saved.id, "route": "done"}
         if decision.decision == DecisionType.REJECT or decision.proposed_quantity == 0:
+            _persist_final_decision(session, review, saved, decision, payload.get("errors", []))
             review.status = "COMPLETED"
             review.completed_at = datetime.now(UTC)
             record_event(
@@ -285,12 +363,12 @@ def _prepare(state: ReviewState) -> dict:
         proposal_version = saved.version
         review.current_proposal_version = proposal_version
 
-        hard_cap = (
-            min(decision.budget_units, decision.storage_units)
-            if (decision.budget_units and decision.storage_units)
+        recovery_plan = scenario_type in {"supplier-shortfall", "demand-change"}
+        target_need = (
+            decision.raw_need
+            if recovery_plan or scenario_type == "custom-scenario"
             else decision.proposed_quantity
         )
-        target_need = min(decision.raw_need, hard_cap) if decision.raw_need > 0 else decision.proposed_quantity
 
         sourcing_plan, plan_result, proposal = create_and_persist_sourcing_plan(
             session=session,
@@ -322,8 +400,19 @@ def _prepare(state: ReviewState) -> dict:
             },
         )
 
-        # In multi-supplier shortfall cases, if full coverage is infeasible:
+        # Recovery plans are action-safe only when they cover the entire shortage.
         if plan_result.status != "COMPLETE":
+            final_decision = decision.model_copy(
+                update={
+                    "decision": DecisionType.INVESTIGATE,
+                    "proposed_quantity": 0,
+                    "total_cost_minor": 0,
+                    "reason_codes": tuple(dict.fromkeys((*decision.reason_codes, "SHORTFALL_UNRESOLVED"))),
+                }
+            )
+            _persist_final_decision(
+                session, review, saved, final_decision, payload.get("errors", [])
+            )
             review.status = "NEEDS_ATTENTION"
             record_event(
                 session,
@@ -334,11 +423,16 @@ def _prepare(state: ReviewState) -> dict:
             session.commit()
             return {"decision_id": saved.id, "sourcing_plan_id": sourcing_plan.id, "route": "done"}
 
-        # If multi-supplier allocation covered the full raw need (e.g. 600 across 2 suppliers where preferred was 300):
-        if plan_result.covered_quantity > saved.proposed_quantity:
-            saved.proposed_quantity = plan_result.covered_quantity
-            saved.calculation_json["total_cost_minor"] = plan_result.total_cost_minor
-            session.flush()
+        final_decision = decision.model_copy(
+            update={
+                "proposed_quantity": plan_result.covered_quantity,
+                "total_cost_minor": plan_result.total_cost_minor,
+            }
+        )
+        _persist_final_decision(
+            session, review, saved, final_decision, payload.get("errors", [])
+        )
+        session.flush()
 
         review.status = "AWAITING_APPROVAL"
         session.add(
@@ -470,7 +564,6 @@ def _prevalidate(state: ReviewState) -> dict:
             ) + 1
             new_snapshot = store_snapshot(session, review.id, sequence, payload)
             new_id_ = new_id()
-            explanation, provider = ExplanationProvider().explain(refreshed, payload.get("errors"))
             updated = Decision(
                 id=new_id_,
                 review_id=review.id,
@@ -483,26 +576,18 @@ def _prevalidate(state: ReviewState) -> dict:
                 confidence_label=refreshed.confidence.value,
                 reason_codes_json=list(refreshed.reason_codes),
                 calculation_json=refreshed.model_dump(mode="json", exclude={"evidence"}),
-                explanation_json=explanation.model_dump(mode="json"),
+                explanation_json={},
             )
             session.add(updated)
             session.flush()
             request.status = "SUPERSEDED"
             if proposal:
                 proposal.status = "SUPERSEDED"
-            record_event(
-                session,
-                review.id,
-                "DECISION_CALCULATED",
-                {
-                    "decision": refreshed.decision.value,
-                    "quantity": refreshed.proposed_quantity,
-                    "reason_codes": list(refreshed.reason_codes),
-                    "policy_version": review.policy_version,
-                },
-            )
             review.current_proposal_version = updated.version
             if refreshed.decision == DecisionType.INVESTIGATE:
+                _persist_final_decision(
+                    session, review, updated, refreshed, payload.get("errors", [])
+                )
                 review.status = "NEEDS_ATTENTION"
                 record_event(
                     session,
@@ -513,6 +598,9 @@ def _prevalidate(state: ReviewState) -> dict:
                 session.commit()
                 return {"decision_id": updated.id, "route": "done"}
             if refreshed.decision == DecisionType.REJECT or refreshed.proposed_quantity == 0:
+                _persist_final_decision(
+                    session, review, updated, refreshed, payload.get("errors", [])
+                )
                 review.status = "COMPLETED"
                 review.completed_at = datetime.now(UTC)
                 record_event(
@@ -520,14 +608,11 @@ def _prevalidate(state: ReviewState) -> dict:
                 )
                 session.commit()
                 return {"decision_id": updated.id, "route": "done"}
-            hard_cap = (
-                min(refreshed.budget_units, refreshed.storage_units)
-                if (refreshed.budget_units and refreshed.storage_units)
-                else refreshed.proposed_quantity
-            )
+            scenario_type = review.scenario_type or "recommendation-review"
+            recovery_plan = scenario_type in {"supplier-shortfall", "demand-change"}
             target_need = (
-                min(refreshed.raw_need, hard_cap)
-                if refreshed.raw_need > 0
+                refreshed.raw_need
+                if recovery_plan or scenario_type == "custom-scenario"
                 else refreshed.proposed_quantity
             )
             sourcing_plan, plan_result, proposal = create_and_persist_sourcing_plan(
@@ -547,10 +632,47 @@ def _prevalidate(state: ReviewState) -> dict:
                 preferred_supplier_id=recommendation.preferred_supplier_id,
                 alternate_sourcing_required=(review.recovery_attempts > 0),
             )
-            if plan_result.covered_quantity > updated.proposed_quantity:
-                updated.proposed_quantity = plan_result.covered_quantity
-                updated.calculation_json["total_cost_minor"] = plan_result.total_cost_minor
-                session.flush()
+            if plan_result.status != "COMPLETE":
+                final_decision = refreshed.model_copy(
+                    update={
+                        "decision": DecisionType.INVESTIGATE,
+                        "proposed_quantity": 0,
+                        "total_cost_minor": 0,
+                        "reason_codes": tuple(
+                            dict.fromkeys((*refreshed.reason_codes, "SHORTFALL_UNRESOLVED"))
+                        ),
+                    }
+                )
+                _persist_final_decision(
+                    session, review, updated, final_decision, payload.get("errors", [])
+                )
+                review.status = "NEEDS_ATTENTION"
+                record_event(
+                    session,
+                    review.id,
+                    "REVIEW_ESCALATED",
+                    {
+                        "reason_codes": ["SHORTFALL_UNRESOLVED"],
+                        "sourcing_plan_id": sourcing_plan.id,
+                    },
+                )
+                session.commit()
+                return {
+                    "decision_id": updated.id,
+                    "sourcing_plan_id": sourcing_plan.id,
+                    "route": "done",
+                }
+
+            final_decision = refreshed.model_copy(
+                update={
+                    "proposed_quantity": plan_result.covered_quantity,
+                    "total_cost_minor": plan_result.total_cost_minor,
+                }
+            )
+            provider = _persist_final_decision(
+                session, review, updated, final_decision, payload.get("errors", [])
+            )
+            session.flush()
 
             review.status = "AWAITING_APPROVAL"
             session.add(

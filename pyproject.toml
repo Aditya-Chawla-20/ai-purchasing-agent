@@ -27,6 +27,7 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["apps/api"]
 addopts = "-q"
+markers = ["live_provider: opt-in network contract checks for configured tool providers"]
 
 [tool.ruff]
 line-length = 100

@@ -142,6 +142,18 @@ def reset_scenario(session: Session, name: str) -> tuple[PurchasingReview, DemoS
         if sp:
             sp.max_available_quantity = 300
             sp.observed_at = now
+        forecast = session.scalar(
+            select(Forecast)
+            .where(
+                Forecast.product_id == recommendation.product_id,
+                Forecast.node_id == recommendation.node_id,
+                Forecast.model_version == "seed-v1",
+            )
+        )
+        if forecast:
+            # usable 150 + eligible incoming 100 versus target 700 => 450 recovery units.
+            forecast.expected_demand = 650
+            forecast.observed_at = now
     elif name == "demand-spike":
         scenario_type = "demand-change"
         revised_fc = session.scalar(
@@ -302,13 +314,20 @@ def _restore_baseline(session: Session) -> None:
     terms = session.get(SupplierProduct, (supplier.id, apples.product_id))
     storage = session.get(StorageCapacity, apples.node_id)
     budget = session.scalar(select(Budget).where(Budget.node_id == apples.node_id))
+    forecast = session.scalar(
+        select(Forecast).where(
+            Forecast.product_id == apples.product_id,
+            Forecast.node_id == apples.node_id,
+            Forecast.model_version == "seed-v1",
+        )
+    )
     open_po = session.scalar(
         select(PurchaseOrder).where(PurchaseOrder.external_id == "PO-SEED-OPEN-001")
     )
     partial = session.scalar(
         select(PurchaseOrder).where(PurchaseOrder.external_id == "PO-PARTIAL-500")
     )
-    assert inventory and terms and storage and budget and open_po and partial
+    assert inventory and terms and storage and budget and forecast and open_po and partial
     inventory.on_hand, inventory.reserved, inventory.damaged = 180, 20, 10
     inventory.version += 1
     inventory.observed_at = now
@@ -319,6 +338,10 @@ def _restore_baseline(session: Session) -> None:
     storage.available_volume, storage.version, storage.observed_at = 4_500, storage.version + 1, now
     budget.allocated_minor, budget.committed_minor = 1_000_000, 400_000
     budget.version, budget.observed_at = budget.version + 1, now
+    forecast.expected_demand = 700
+    forecast.window_start = now - timedelta(days=1)
+    forecast.window_end = now + timedelta(days=8)
+    forecast.observed_at = now
     open_po.status = "OPEN"
     open_po.expected_delivery_at = now + timedelta(days=3)
     open_po.updated_at = now
